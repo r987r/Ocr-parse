@@ -1,0 +1,268 @@
+"""
+Test suite for OCR Parse.
+
+Creates a fake PDF with known text, uploads it to the app,
+verifies OCR extraction, and tests the full pipeline including export.
+"""
+
+import io
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from fpdf import FPDF
+
+# Ensure uploads go to a temp directory during tests
+_test_upload_dir = tempfile.mkdtemp(prefix="ocr_parse_test_")
+
+# Patch UPLOAD_BASE before importing app
+import app as app_module
+
+app_module.UPLOAD_BASE = Path(_test_upload_dir)
+
+from app import app
+
+
+def _make_test_pdf(text_lines=None):
+    """Generate a simple PDF with known text content."""
+    if text_lines is None:
+        text_lines = [
+            "INVOICE #12345",
+            "Date: January 15, 2025",
+            "",
+            "Bill To: John Smith",
+            "123 Main Street",
+            "Springfield, IL 62701",
+            "",
+            "Item: Widget A - Qty: 10 - Price: $5.00",
+            "Item: Widget B - Qty: 5 - Price: $12.50",
+            "",
+            "Subtotal: $112.50",
+            "Tax (8%): $9.00",
+            "Total: $121.50",
+            "",
+            "Notes: Please review and approve.",
+        ]
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=14)
+
+    for line in text_lines:
+        if line == "":
+            pdf.ln(8)
+        else:
+            pdf.cell(0, 10, line, new_x="LMARGIN", new_y="NEXT")
+
+    buf = io.BytesIO()
+    pdf.output(buf)
+    buf.seek(0)
+    return buf
+
+
+class TestOCRParse(unittest.TestCase):
+    """End-to-end tests for the OCR Parse application."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def tearDown(self):
+        # Clean up any session directories created during tests
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    def test_index_page(self):
+        """The upload page loads successfully."""
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"OCR Parse", resp.data)
+
+    def test_health_check(self):
+        """The health endpoint returns ok."""
+        resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertEqual(data["status"], "ok")
+
+    def test_upload_no_file(self):
+        """Upload without a file returns an error."""
+        resp = self.client.post("/upload")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_upload_and_process(self):
+        """Upload a PDF and run OCR – verify text is extracted."""
+        pdf_buf = _make_test_pdf()
+
+        # Upload
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+        self.assertTrue(session_id)
+        self.assertIn("/review/", data["redirect"])
+
+        # Process (OCR)
+        resp = self.client.post(f"/api/process/{session_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"])
+        self.assertGreaterEqual(data["num_pages"], 1)
+
+        # Verify OCR extracted some text
+        results = data["results"]
+        self.assertTrue(len(results) > 0)
+        all_text = " ".join(
+            block["text"] for page in results for block in page["blocks"]
+        )
+        # The OCR should find at least some of these words
+        found_keywords = sum(
+            1
+            for kw in ["INVOICE", "12345", "John", "Smith", "Widget", "Total"]
+            if kw.lower() in all_text.lower()
+        )
+        self.assertGreaterEqual(
+            found_keywords, 2, f"Expected to find keywords in OCR text: {all_text}"
+        )
+
+    def test_full_pipeline(self):
+        """Full pipeline: upload → OCR → add annotations → export docx."""
+        pdf_buf = _make_test_pdf()
+
+        # Upload
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        # Process
+        resp = self.client.post(f"/api/process/{session_id}")
+        self.assertEqual(resp.status_code, 200)
+
+        # Get page image
+        resp = self.client.get(f"/api/page/{session_id}/1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content_type, "image/png")
+
+        # Save annotations
+        annotations = [
+            {"id": "test-1", "text": "Please fix this amount", "type": "comment", "page": 1},
+            {"id": "test-2", "text": "New line item added", "type": "insert", "page": 1},
+        ]
+        resp = self.client.post(
+            f"/api/annotations/{session_id}",
+            data=json.dumps(annotations),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Export
+        resp = self.client.post(f"/api/export/{session_id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("wordprocessingml", resp.content_type)
+        self.assertGreater(len(resp.data), 1000)  # docx should be non-trivial
+
+    def test_cleanup(self):
+        """Cleanup endpoint removes session files."""
+        pdf_buf = _make_test_pdf()
+
+        # Upload
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        sdir = Path(_test_upload_dir) / session_id
+        self.assertTrue(sdir.exists())
+
+        # Cleanup
+        resp = self.client.post(f"/api/cleanup/{session_id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(sdir.exists())
+
+    def test_tesseract_engine_only(self):
+        """Verify the app always uses Tesseract regardless of form data."""
+        pdf_buf = _make_test_pdf()
+
+        # Try to select openai engine – should be ignored
+        resp = self.client.post(
+            "/upload",
+            data={
+                "annotated_pdf": (pdf_buf, "test.pdf"),
+                "ocr_engine": "openai",
+                "api_key": "fake-key",
+            },
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        config_path = Path(_test_upload_dir) / session_id / "config.json"
+        with open(config_path) as f:
+            config = json.load(f)
+        self.assertEqual(config["ocr_engine"], "tesseract")
+        self.assertEqual(config["api_key"], "")
+
+
+class TestOCREngine(unittest.TestCase):
+    """Unit tests for OCR engine."""
+
+    def test_tesseract_extract(self):
+        """Tesseract extracts text from a simple image."""
+        from PIL import Image, ImageDraw, ImageFont
+        from ocr_engine import OCREngine
+
+        # Create a test image with text
+        img = Image.new("RGB", (400, 100), color="white")
+        draw = ImageDraw.Draw(img)
+        draw.text((20, 30), "Hello World Test 123", fill="black")
+
+        engine = OCREngine(engine="tesseract")
+        blocks = engine.extract_text_blocks(img)
+
+        all_text = " ".join(b["text"] for b in blocks).lower()
+        self.assertIn("hello", all_text)
+        self.assertIn("world", all_text)
+
+
+class TestWordExport(unittest.TestCase):
+    """Unit tests for Word document export."""
+
+    def test_create_document_with_annotations(self):
+        """Word export creates a valid docx file."""
+        from word_export import create_word_document
+
+        annotations = [
+            {"text": "Test comment", "type": "comment", "page": 1},
+            {"text": "Inserted text", "type": "insert", "page": 1},
+            {"text": "Deleted text", "type": "delete", "page": 1},
+        ]
+
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
+            output_path = f.name
+
+        try:
+            create_word_document(annotations, None, output_path)
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 1000)
+        finally:
+            os.unlink(output_path)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,12 +1,17 @@
 """
 OCR Parse - PDF Review Annotation Web App
 Flask application entry point.
+
+Uses Tesseract (free, local) for OCR. No document retention – session
+files are deleted after export or automatically after a timeout.
 """
 
 import os
 import uuid
 import json
 import shutil
+import time
+import threading
 import logging
 from pathlib import Path
 
@@ -40,6 +45,9 @@ UPLOAD_BASE.mkdir(exist_ok=True)
 ALLOWED_PDF = {"pdf"}
 ALLOWED_DOC = {"pdf", "docx", "doc"}
 
+# Session auto-cleanup: delete session files after this many seconds
+SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE", "1800"))  # 30 min
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,6 +76,40 @@ def _save_json(path: Path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _cleanup_session(session_id: str):
+    """Remove all files for a session (no document retention)."""
+    sdir = UPLOAD_BASE / session_id
+    if sdir.exists():
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def _cleanup_old_sessions():
+    """Remove sessions older than SESSION_MAX_AGE_SECONDS."""
+    now = time.time()
+    if not UPLOAD_BASE.exists():
+        return
+    for child in UPLOAD_BASE.iterdir():
+        if child.is_dir():
+            try:
+                age = now - child.stat().st_mtime
+                if age > SESSION_MAX_AGE_SECONDS:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                pass
+
+
+def _start_cleanup_timer():
+    """Run periodic cleanup every 10 minutes."""
+    _cleanup_old_sessions()
+    t = threading.Timer(600, _start_cleanup_timer)
+    t.daemon = True
+    t.start()
+
+
+# Start the cleanup timer when the module is loaded
+_start_cleanup_timer()
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -76,6 +118,12 @@ def _save_json(path: Path, data):
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/health")
+def health():
+    """Health check endpoint for deployment platforms."""
+    return jsonify({"status": "ok"})
 
 
 @app.route("/upload", methods=["POST"])
@@ -104,11 +152,11 @@ def upload():
             orig_file.save(str(sdir / f"original.{orig_ext}"))
             has_original = True
 
-    # Persist config
+    # Persist config – always use Tesseract (free, local)
     config = {
         "session_id": session_id,
-        "ocr_engine": request.form.get("ocr_engine", "tesseract"),
-        "api_key": request.form.get("api_key", ""),
+        "ocr_engine": "tesseract",
+        "api_key": "",
         "has_original": has_original,
         "orig_ext": orig_ext,
     }
@@ -266,6 +314,13 @@ def export_document(session_id):
     )
 
 
+@app.route("/api/cleanup/<session_id>", methods=["POST"])
+def cleanup(session_id):
+    """Delete all session files (no document retention)."""
+    _cleanup_session(session_id)
+    return jsonify({"success": True})
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -274,6 +329,7 @@ if __name__ == "__main__":
     print()
     print("=" * 60)
     print("  OCR Parse – PDF Review Annotation Tool")
+    print("  Free Tesseract OCR · No document retention")
     print("=" * 60)
     print("  Open your browser and go to: http://localhost:5000")
     print("=" * 60)

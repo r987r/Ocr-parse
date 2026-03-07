@@ -1,117 +1,94 @@
 # OCR Parse – PDF Review Annotation Tool
 
-A local web application that reads a PDF containing **handwritten** or typed review comments, lets you review and edit the extracted annotations, and exports a **Word document (.docx)** with real Word **comments** and **tracked changes**.
+Upload a PDF, review extracted text, and export a Word document with **tracked changes** and **comments**. Free, private, and zero config.
+
+- **Free OCR** – Uses Tesseract (no API keys needed)
+- **No document retention** – Files are deleted after your session ends
+- **One-click deploy** – Docker or Render.com (free tier)
 
 ---
 
-## Features
+## Deploy to Render.com (Free – Recommended)
 
-| Feature | Description |
+The fastest way to get running. No local install needed.
+
+1. **Fork this repo** on GitHub
+2. Go to [render.com](https://render.com) and sign up (free)
+3. Click **New → Web Service**
+4. Connect your GitHub account and select your forked `Ocr-parse` repo
+5. Render auto-detects the `render.yaml` – click **Apply**
+6. Wait for the build to finish (~3–5 minutes)
+7. Open the provided URL and upload your PDF
+
+> **That's it.** Render provides a free HTTPS URL. The app uses Tesseract OCR (pre-installed in Docker) and deletes all documents after your session ends.
+
+---
+
+## Deploy with Docker (Local)
+
+```bash
+# Build
+docker build -t ocr-parse .
+
+# Run
+docker run -p 5000:10000 -e SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") ocr-parse
+```
+
+Open **http://localhost:5000** and upload your PDF.
+
+---
+
+## Run Locally (Without Docker)
+
+### Prerequisites
+
+| Dependency | Install |
 |---|---|
-| **PDF upload** | Upload an annotated PDF (with handwritten or printed review marks) |
-| **Original document** | Optionally upload the original `.docx` to use as the base |
-| **Multiple OCR engines** | Tesseract (free, local), OpenAI GPT-4o Vision, or Google Cloud Vision |
-| **Side-by-side review** | PDF page image on the left, extracted text blocks on the right |
-| **Editable annotations** | Add, edit, and delete annotations; choose type: Comment / Insert / Delete |
-| **Word export** | Exports `.docx` with real Word comment balloons and tracked changes |
-| **Runs locally** | No data leaves your machine (unless you use a paid OCR engine) |
+| **Python 3.10+** | [python.org](https://www.python.org/downloads/) |
+| **Tesseract OCR** | `sudo apt install tesseract-ocr` (Linux) · [UB-Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki) (Windows) · `brew install tesseract` (Mac) |
+| **Poppler** | `sudo apt install poppler-utils` (Linux) · [oschwartz10612/poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases) (Windows) · `brew install poppler` (Mac) |
 
----
+### Steps
 
-## Quick Start (Windows)
-
-### 1 – Install Python 3.10+
-
-Download from [python.org](https://www.python.org/downloads/windows/).  
-During setup, check **"Add Python to PATH"**.
-
-### 2 – Install Tesseract OCR (free engine)
-
-1. Download the installer from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki) (choose the latest `.exe`).
-2. Run the installer. Note the installation path (default: `C:\Program Files\Tesseract-OCR\`).
-3. Add Tesseract to your system PATH:
-   - Open **Start → System Properties → Advanced → Environment Variables**
-   - Under *System Variables*, find **Path** and click **Edit**
-   - Click **New** and add `C:\Program Files\Tesseract-OCR`
-4. Verify: open a new Command Prompt and run `tesseract --version`.
-
-### 3 – Install Poppler (needed for PDF-to-image conversion)
-
-1. Download the latest Windows build from [oschwartz10612/poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases).
-2. Extract the ZIP to a folder, e.g. `C:\poppler\`.
-3. Add `C:\poppler\Library\bin` to your PATH (same way as above).
-4. Verify: open a new Command Prompt and run `pdfinfo --version`.
-
-### 4 – Download this project
-
-```bat
+```bash
 git clone https://github.com/r987r/Ocr-parse.git
 cd Ocr-parse
-```
-
-Or download the ZIP from GitHub and extract it.
-
-### 5 – Create a virtual environment and install dependencies
-
-```bat
 python -m venv venv
-venv\Scripts\activate
+source venv/bin/activate        # Linux/Mac
+# venv\Scripts\activate         # Windows
 pip install -r requirements.txt
-```
-
-### 6 – Run the app
-
-```bat
 python app.py
 ```
 
-Open your browser and go to **http://localhost:5000**.
-
----
-
-## OCR Engine Options
-
-| Engine | Cost | Best for | Setup |
-|---|---|---|---|
-| **Tesseract** | ✅ Free | Printed/typed text; basic handwriting | Install Tesseract (Step 2 above) |
-| **OpenAI GPT-4o Vision** | 💳 Paid (~$0.01–0.05/page) | Excellent handwriting, context-aware | Get API key at [platform.openai.com](https://platform.openai.com/api-keys); `pip install openai` |
-| **Google Cloud Vision** | 💳 Paid (free tier: 1,000 units/month) | High-accuracy handwriting detection | Create service-account JSON at [Google Cloud Console](https://console.cloud.google.com); `pip install google-cloud-vision` |
-
-To use a paid engine, select it on the upload page and enter your API key (or file path for Google credentials).
+Open **http://localhost:5000**.
 
 ---
 
 ## How to Use
 
-1. **Upload page** – Select your annotated PDF and optionally your original document. Choose an OCR engine and click **Upload & Process**.
-
-2. **Review page** – The app converts each PDF page to an image and runs OCR.
-   - **Left panel**: Browse PDF pages with ← → navigation. Below each page image, the extracted text blocks are listed with confidence scores.
-   - Click **➕ Add** next to any text block to add it as an annotation.
-   - Click **+ Add Manually** to type an annotation by hand.
-
-3. **Edit annotations** – In the right panel, each annotation shows:
-   - A text editor (edit the OCR'd text if needed)
-   - A type selector:
-     - **💬 Comment** → appears as a Word comment balloon in the margin
-     - **➕ Insert** → appears as a tracked change insertion (new text, shown in colour)
-     - **🗑 Delete** → appears as a tracked change deletion (strikethrough text)
-
-4. **Export** – When you're happy, click **💾 Make File (Export .docx)**. The browser downloads `reviewed_document.docx`.
-
-5. **Open in Word** – Open the file in Microsoft Word. Go to the **Review** tab to see all comments and track changes. Accept or reject changes as needed.
+1. **Upload** your PDF (the one with handwritten or printed annotations)
+2. Optionally upload the **original document** (.docx) as the base
+3. **Review** the OCR-extracted text side-by-side with the PDF pages
+4. Click **➕ Add** on any text block to create an annotation, or add manually
+5. Choose the annotation type: **Comment** (Word comment balloon), **Insert** (tracked insertion), or **Delete** (tracked deletion)
+6. Click **💾 Make File** to download a `.docx` with all annotations
+7. Open in Microsoft Word → **Review tab** to see comments and tracked changes
 
 ---
 
-## Troubleshooting
+## Privacy & Security
 
-| Problem | Solution |
-|---|---|
-| `tesseract is not installed` | Follow Step 2 above and make sure Tesseract is in your PATH |
-| `pdf2image` fails | Follow Step 3 above and make sure Poppler is in your PATH |
-| Handwriting not recognised | Switch to OpenAI or Google Cloud Vision for better handwriting accuracy |
-| `pip install` fails | Make sure your virtual environment is activated and you're using Python 3.10+ |
-| Port 5000 already in use | Change the port in `app.py`: `app.run(port=5001)` |
+- Uses **Tesseract OCR** – all processing happens on the server, no data sent to third-party APIs
+- **No document retention** – uploaded files and session data are automatically deleted after export or when you leave the page. A background cleanup also removes any orphaned sessions after 30 minutes
+- For shared deployments, set the `SECRET_KEY` environment variable (Render does this automatically)
+
+---
+
+## Running Tests
+
+```bash
+python -m unittest test_app -v
+```
 
 ---
 
@@ -120,28 +97,16 @@ To use a paid engine, select it on the upload page and enter your API key (or fi
 ```
 Ocr-parse/
 ├── app.py              # Flask web application
-├── ocr_engine.py       # OCR engine abstraction (Tesseract / OpenAI / Google)
-├── word_export.py      # Word document export with comments & tracked changes
+├── ocr_engine.py       # Tesseract OCR engine
+├── word_export.py      # Word document export (comments & tracked changes)
+├── test_app.py         # Test suite with fake PDF
 ├── requirements.txt    # Python dependencies
+├── Dockerfile          # Docker image (Tesseract + Poppler pre-installed)
+├── render.yaml         # Render.com deployment config
 ├── templates/
 │   ├── index.html      # Upload page
 │   └── review.html     # Review & annotation page
-├── static/
-│   └── css/
-│       └── style.css   # Stylesheet
-└── uploads/            # Session files (created automatically, not committed)
+└── static/
+    └── css/
+        └── style.css   # Stylesheet
 ```
-
----
-
-## Privacy & Security
-
-- All file processing happens **on your local machine**.
-- Uploaded files are stored in the `uploads/` folder (auto-created, not committed to git).
-- If you use OpenAI or Google Cloud Vision, page images are sent to their respective APIs. Review their privacy policies before uploading confidential documents.
-- The `SECRET_KEY` in `app.py` is only for development. For any shared deployment, set `SECRET_KEY` as an environment variable.
-- Debug mode is **off** by default. To enable it (for development only), set `FLASK_DEBUG=1` before running:
-  ```bat
-  set FLASK_DEBUG=1
-  python app.py
-  ```

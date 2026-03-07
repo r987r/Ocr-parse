@@ -338,6 +338,100 @@ class TestOCRParse(unittest.TestCase):
         finally:
             app_module.DEBUG_LOG_PATH = original_path
 
+    def test_process_returns_debug_info_when_enabled(self):
+        """Processing returns debug info when DEBUG_MODE is on."""
+        import app as app_module
+
+        original_debug = app_module.DEBUG_MODE
+        app_module.DEBUG_MODE = True
+        try:
+            pdf_buf = _make_test_pdf()
+            resp = self.client.post(
+                "/upload",
+                data={"annotated_pdf": (pdf_buf, "test.pdf")},
+                content_type="multipart/form-data",
+            )
+            data = json.loads(resp.data)
+            session_id = data["session_id"]
+
+            resp = self.client.post(f"/api/process/{session_id}")
+            self.assertEqual(resp.status_code, 200)
+            data = json.loads(resp.data)
+            self.assertTrue(data["success"])
+
+            # Debug info should be present
+            self.assertIn("debug", data)
+            debug = data["debug"]
+            self.assertTrue(debug["debug_mode"])
+            self.assertIn("tesseract_version", debug)
+            self.assertIn("poppler_version", debug)
+            self.assertIn("steps", debug)
+            self.assertGreater(len(debug["steps"]), 0)
+            self.assertIn("session_id", debug)
+            self.assertIn("pdf_file_size_bytes", debug)
+            self.assertIn("total_elapsed_sec", debug)
+
+            # Verify steps include pdf_to_images and at least one ocr page
+            step_names = [s["step"] for s in debug["steps"]]
+            self.assertIn("pdf_to_images", step_names)
+            self.assertTrue(any(s.startswith("ocr_page_") for s in step_names))
+        finally:
+            app_module.DEBUG_MODE = original_debug
+
+    def test_process_no_debug_info_when_disabled(self):
+        """Processing omits debug info when DEBUG_MODE is off."""
+        import app as app_module
+
+        original_debug = app_module.DEBUG_MODE
+        app_module.DEBUG_MODE = False
+        try:
+            pdf_buf = _make_test_pdf()
+            resp = self.client.post(
+                "/upload",
+                data={"annotated_pdf": (pdf_buf, "test.pdf")},
+                content_type="multipart/form-data",
+            )
+            data = json.loads(resp.data)
+            session_id = data["session_id"]
+
+            resp = self.client.post(f"/api/process/{session_id}")
+            self.assertEqual(resp.status_code, 200)
+            data = json.loads(resp.data)
+            self.assertTrue(data["success"])
+            self.assertNotIn("debug", data)
+        finally:
+            app_module.DEBUG_MODE = original_debug
+
+    def test_debug_info_endpoint(self):
+        """The /api/debug/info endpoint returns system diagnostics."""
+        import app as app_module
+
+        original_debug = app_module.DEBUG_MODE
+        app_module.DEBUG_MODE = True
+        try:
+            resp = self.client.get("/api/debug/info")
+            self.assertEqual(resp.status_code, 200)
+            data = json.loads(resp.data)
+            self.assertTrue(data["debug_mode"])
+            self.assertIn("tesseract_version", data)
+            self.assertIn("poppler_version", data)
+        finally:
+            app_module.DEBUG_MODE = original_debug
+
+    def test_debug_info_endpoint_disabled(self):
+        """The /api/debug/info endpoint indicates off when DEBUG_MODE is off."""
+        import app as app_module
+
+        original_debug = app_module.DEBUG_MODE
+        app_module.DEBUG_MODE = False
+        try:
+            resp = self.client.get("/api/debug/info")
+            self.assertEqual(resp.status_code, 200)
+            data = json.loads(resp.data)
+            self.assertFalse(data["debug_mode"])
+        finally:
+            app_module.DEBUG_MODE = original_debug
+
 
 class TestOCREngine(unittest.TestCase):
     """Unit tests for OCR engine."""

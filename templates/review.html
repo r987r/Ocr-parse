@@ -13,9 +13,16 @@
   <div class="review-header-inner">
     <a href="/" class="btn-ghost">← New Upload</a>
     <h1>📄 Review Annotations</h1>
-    <button id="exportBtn" class="btn-primary btn-export">
-      💾 Make File (Export .docx)
-    </button>
+    <div class="header-actions">
+      {% if debug_mode %}
+      <button id="debugToggleBtn" class="btn-secondary btn-debug" onclick="toggleDebugPanel()">
+        🔧 Debug
+      </button>
+      {% endif %}
+      <button id="exportBtn" class="btn-primary btn-export">
+        💾 Make File (Export .docx)
+      </button>
+    </div>
   </div>
 </header>
 
@@ -86,11 +93,25 @@
 <!-- ===== Error toast ===== -->
 <div id="toast" class="toast" style="display:none;"></div>
 
+{% if debug_mode %}
+<!-- ===== Debug panel (only when DEBUG_MODE=1) ===== -->
+<div id="debugPanel" class="debug-panel" style="display:none;">
+  <div class="debug-panel-header">
+    <h3>🔧 Debug Info</h3>
+    <button class="btn-ghost" onclick="document.getElementById('debugPanel').style.display='none'">✕ Close</button>
+  </div>
+  <div id="debugContent" class="debug-content">
+    <p class="muted">Debug info will appear after processing…</p>
+  </div>
+</div>
+{% endif %}
+
 <!-- ===== Hidden session info ===== -->
 <script>
   const SESSION_ID   = "{{ session_id }}";
   const OCR_ENGINE   = "{{ config.get('ocr_engine', 'tesseract') }}";
   const HAS_ORIGINAL = {{ 'true' if config.get('has_original') else 'false' }};
+  const DEBUG_MODE   = {{ 'true' if debug_mode else 'false' }};
 </script>
 
 <script>
@@ -101,6 +122,7 @@ let ocrResults   = [];     // [{page, blocks:[{text,confidence,block_num}]}]
 let annotations  = [];     // [{id, text, type, page}]
 let currentPage  = 1;
 let totalPages   = 1;
+let debugData    = null;   // debug info from /api/process response
 
 // ============================================================
 // Boot: run OCR on page load
@@ -121,10 +143,22 @@ window.addEventListener('DOMContentLoaded', async () => {
       );
     }
 
-    if (!resp.ok || json.error) throw new Error(json.error || 'Processing failed.');
+    if (!resp.ok || json.error) {
+      // Capture debug data from error responses too
+      if (json.debug) {
+        debugData = json.debug;
+      }
+      throw new Error(json.error || 'Processing failed.');
+    }
 
     ocrResults = json.results || [];
     totalPages = json.num_pages || 1;
+
+    // Capture debug info if present
+    if (json.debug) {
+      debugData = json.debug;
+      if (DEBUG_MODE) renderDebugPanel();
+    }
 
     // Load any saved annotations
     const annResp = await fetch(`/api/annotations/${SESSION_ID}`);
@@ -140,6 +174,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('overlayMsg').textContent = '⚠ ' + err.message;
     document.querySelector('#processingOverlay small').textContent =
       'Please go back and try again, or check your OCR engine setup.';
+    // Show debug panel on error if available
+    if (DEBUG_MODE && debugData) renderDebugPanel();
   }
 });
 
@@ -362,6 +398,86 @@ function escHtml(str) {
   const d = document.createElement('div');
   d.appendChild(document.createTextNode(str || ''));
   return d.innerHTML;
+}
+
+// ============================================================
+// Debug panel
+// ============================================================
+function toggleDebugPanel() {
+  const panel = document.getElementById('debugPanel');
+  if (!panel) return;
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function renderDebugPanel() {
+  const panel = document.getElementById('debugPanel');
+  const content = document.getElementById('debugContent');
+  if (!panel || !content || !debugData) return;
+
+  panel.style.display = 'block';
+
+  let html = '<div class="debug-grid">';
+
+  // System info
+  html += '<div class="debug-section"><h4>System</h4><table class="debug-table">';
+  const sysFields = [
+    ['Tesseract', debugData.tesseract_version || 'unknown'],
+    ['Tesseract Installed', debugData.tesseract_installed ? '✅ Yes' : '❌ No'],
+    ['Poppler', debugData.poppler_version || 'unknown'],
+    ['Poppler Installed', debugData.poppler_installed ? '✅ Yes' : '❌ No'],
+    ['Pillow', debugData.pillow_version || 'unknown'],
+    ['pdf2image', debugData.pdf2image_version || 'unknown'],
+  ];
+  if (debugData.disk_free_mb != null) {
+    sysFields.push(['Disk Free', debugData.disk_free_mb + ' MB']);
+  }
+  sysFields.forEach(([k, v]) => {
+    html += `<tr><td class="debug-key">${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`;
+  });
+  html += '</table></div>';
+
+  // Session / PDF info
+  html += '<div class="debug-section"><h4>Session</h4><table class="debug-table">';
+  const sessFields = [
+    ['Session ID', debugData.session_id || SESSION_ID],
+    ['OCR Engine', debugData.ocr_engine || OCR_ENGINE],
+    ['PDF Size', debugData.pdf_file_size_mb != null ? `${debugData.pdf_file_size_mb} MB` : 'unknown'],
+    ['Total Time', debugData.total_elapsed_sec != null ? `${debugData.total_elapsed_sec}s` : 'pending'],
+    ['Timestamp', debugData.timestamp || ''],
+  ];
+  sessFields.forEach(([k, v]) => {
+    html += `<tr><td class="debug-key">${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`;
+  });
+  html += '</table></div>';
+
+  html += '</div>'; // close debug-grid
+
+  // Processing steps
+  if (debugData.steps && debugData.steps.length > 0) {
+    html += '<div class="debug-section"><h4>Processing Steps</h4>';
+    html += '<table class="debug-table debug-steps-table"><thead><tr>';
+    html += '<th>Step</th><th>Status</th><th>Time</th><th>Details</th>';
+    html += '</tr></thead><tbody>';
+    debugData.steps.forEach(step => {
+      const statusIcon = step.status === 'ok' ? '✅' : '❌';
+      const statusClass = step.status === 'ok' ? 'debug-ok' : 'debug-error';
+      let details = '';
+      if (step.num_pages != null) details += `Pages: ${step.num_pages}  `;
+      if (step.num_blocks != null) details += `Blocks: ${step.num_blocks}  `;
+      if (step.total_chars != null) details += `Chars: ${step.total_chars}  `;
+      if (step.image_size) details += `Size: ${step.image_size}  `;
+      if (step.error) details += `Error: ${step.error}`;
+      html += `<tr class="${statusClass}">`;
+      html += `<td>${escHtml(step.step)}</td>`;
+      html += `<td>${statusIcon} ${escHtml(step.status)}</td>`;
+      html += `<td>${step.elapsed_sec != null ? step.elapsed_sec + 's' : '-'}</td>`;
+      html += `<td class="debug-details">${escHtml(details.trim())}</td>`;
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  content.innerHTML = html;
 }
 </script>
 </body>

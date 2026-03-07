@@ -13,6 +13,7 @@ import shutil
 import time
 import threading
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,10 @@ ALLOWED_DOC = {"pdf", "docx", "doc"}
 
 # Session auto-cleanup: delete session files after this many seconds
 SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE", "1800"))  # 30 min
+
+# Debug mode: set DEBUG_MODE=1 to include verbose processing info in API
+# responses and on the review page.  Disable for production deployments.
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "1") == "1"
 
 # Debug log: persists failure metadata when the user opts in via the UI
 DEBUG_LOG_PATH = UPLOAD_BASE / "debug_log.json"
@@ -148,6 +153,75 @@ def _start_cleanup_timer():
 
 # Start the cleanup timer when the module is loaded
 _start_cleanup_timer()
+
+
+def _get_system_debug_info() -> dict[str, Any]:
+    """Collect system-level diagnostics useful for debugging processing failures."""
+    info: dict[str, Any] = {
+        "debug_mode": DEBUG_MODE,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    # Tesseract version
+    try:
+        result = subprocess.run(
+            ["tesseract", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        info["tesseract_version"] = (result.stdout or result.stderr).split("\n")[0]
+        info["tesseract_installed"] = True
+    except FileNotFoundError:
+        info["tesseract_version"] = "NOT INSTALLED"
+        info["tesseract_installed"] = False
+    except Exception as exc:
+        info["tesseract_version"] = f"error: {exc}"
+        info["tesseract_installed"] = False
+
+    # Poppler / pdftoppm version
+    try:
+        result = subprocess.run(
+            ["pdftoppm", "-v"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        info["poppler_version"] = (result.stderr or result.stdout).strip()
+        info["poppler_installed"] = True
+    except FileNotFoundError:
+        info["poppler_version"] = "NOT INSTALLED"
+        info["poppler_installed"] = False
+    except Exception as exc:
+        info["poppler_version"] = f"error: {exc}"
+        info["poppler_installed"] = False
+
+    # Disk space for uploads directory
+    try:
+        import shutil as _shutil
+
+        usage = _shutil.disk_usage(str(UPLOAD_BASE))
+        info["disk_free_mb"] = round(usage.free / (1024 * 1024))
+        info["disk_total_mb"] = round(usage.total / (1024 * 1024))
+    except Exception:
+        pass
+
+    # Python / PIL versions
+    try:
+        from PIL import __version__ as pil_ver
+
+        info["pillow_version"] = pil_ver
+    except Exception:
+        pass
+
+    try:
+        import pdf2image
+
+        info["pdf2image_version"] = getattr(pdf2image, "__version__", "unknown")
+    except Exception:
+        pass
+
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +352,7 @@ def review(session_id):
     config = _load_json(sdir / "config.json", {})
     if not config:
         abort(404)
-    return render_template("review.html", session_id=session_id, config=config)
+    return render_template("review.html", session_id=session_id, config=config, debug_mode=DEBUG_MODE)
 
 
 @app.route("/api/process/<session_id>", methods=["POST"])
@@ -293,10 +367,22 @@ def process(session_id):
     if not pdf_path.exists():
         return jsonify({"error": "Annotated PDF not found."}), 404
 
+    # Collect debug info when debug mode is active
+    debug_info: dict[str, Any] = {}
+    total_start = time.time()
+    if DEBUG_MODE:
+        debug_info = _get_system_debug_info()
+        debug_info["session_id"] = session_id
+        debug_info["pdf_file_size_bytes"] = pdf_path.stat().st_size
+        debug_info["pdf_file_size_mb"] = round(pdf_path.stat().st_size / (1024 * 1024), 2)
+        debug_info["ocr_engine"] = config.get("ocr_engine", "tesseract")
+        debug_info["steps"] = []
+
     pages_dir = sdir / "pages"
     pages_dir.mkdir(exist_ok=True)
 
     # -- Convert PDF pages to PNG images --
+    step_start = time.time()
     try:
         import pdf2image
 
@@ -307,7 +393,29 @@ def process(session_id):
             fmt="png",
             output_file="page",
         )
+        if DEBUG_MODE:
+            elapsed = round(time.time() - step_start, 2)
+            debug_info["steps"].append({
+                "step": "pdf_to_images",
+                "status": "ok",
+                "elapsed_sec": elapsed,
+                "num_pages": len(images),
+                "dpi": 150,
+            })
     except Exception as exc:
+        if DEBUG_MODE:
+            elapsed = round(time.time() - step_start, 2)
+            debug_info["steps"].append({
+                "step": "pdf_to_images",
+                "status": "error",
+                "elapsed_sec": elapsed,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
+            return jsonify({
+                "error": f"PDF conversion failed: {exc}",
+                "debug": debug_info,
+            }), 500
         return jsonify({"error": f"PDF conversion failed: {exc}"}), 500
 
     # -- OCR each page --
@@ -321,19 +429,62 @@ def process(session_id):
 
         ocr_results = []
         for idx, img in enumerate(images):
+            page_start = time.time()
             try:
                 blocks = ocr.extract_text_blocks(img)
+                if DEBUG_MODE:
+                    elapsed = round(time.time() - page_start, 2)
+                    total_text = " ".join(b["text"] for b in blocks)
+                    debug_info["steps"].append({
+                        "step": f"ocr_page_{idx + 1}",
+                        "status": "ok",
+                        "elapsed_sec": elapsed,
+                        "num_blocks": len(blocks),
+                        "total_chars": len(total_text),
+                        "image_size": f"{img.width}x{img.height}",
+                    })
             except Exception as exc:
                 blocks = [{"text": f"[OCR error: {exc}]", "confidence": 0, "block_num": 0}]
+                if DEBUG_MODE:
+                    elapsed = round(time.time() - page_start, 2)
+                    debug_info["steps"].append({
+                        "step": f"ocr_page_{idx + 1}",
+                        "status": "error",
+                        "elapsed_sec": elapsed,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    })
 
             ocr_results.append({"page": idx + 1, "blocks": blocks})
 
         _save_json(sdir / "ocr_results.json", ocr_results)
 
-        return jsonify({"success": True, "num_pages": len(images), "results": ocr_results})
+        # Build response
+        resp: dict[str, Any] = {
+            "success": True,
+            "num_pages": len(images),
+            "results": ocr_results,
+        }
+        if DEBUG_MODE:
+            total_elapsed = round(time.time() - total_start, 2)
+            debug_info["total_elapsed_sec"] = total_elapsed
+            resp["debug"] = debug_info
+
+        return jsonify(resp)
 
     except Exception as exc:
         logging.exception("Unexpected OCR processing error for session %s", session_id)
+        if DEBUG_MODE:
+            debug_info["steps"].append({
+                "step": "ocr_processing",
+                "status": "error",
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
+            return jsonify({
+                "error": f"OCR processing failed: {exc}",
+                "debug": debug_info,
+            }), 500
         return jsonify({"error": f"OCR processing failed: {exc}"}), 500
 
 
@@ -441,6 +592,14 @@ def clear_debug_log():
     with _debug_log_lock:
         _save_json(DEBUG_LOG_PATH, [])
     return jsonify({"success": True})
+
+
+@app.route("/api/debug/info")
+def debug_system_info():
+    """Return system diagnostics (tesseract version, poppler, etc.)."""
+    if not DEBUG_MODE:
+        return jsonify({"debug_mode": False, "message": "Debug mode is disabled."})
+    return jsonify(_get_system_debug_info())
 
 
 # ---------------------------------------------------------------------------

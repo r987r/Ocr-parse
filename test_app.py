@@ -1701,7 +1701,7 @@ class TestPDFAnnotationExtraction(unittest.TestCase):
     def test_pdf_annotations_with_embedded_notes(self):
         """PDF with sticky-note annotations returns them in the response."""
         try:
-            import pymupdf  # noqa: F401
+            import pymupdf
         except ImportError:
             self.skipTest("PyMuPDF not installed")
 
@@ -1726,7 +1726,7 @@ class TestPDFAnnotationExtraction(unittest.TestCase):
     def test_pdf_annotations_content_matches(self):
         """The extracted annotation text should match the embedded content."""
         try:
-            import pymupdf  # noqa: F401
+            import pymupdf
         except ImportError:
             self.skipTest("PyMuPDF not installed")
 
@@ -1744,7 +1744,7 @@ class TestPDFAnnotationExtraction(unittest.TestCase):
     def test_pdf_annotations_page_numbers_correct(self):
         """Annotation page numbers should start at 1."""
         try:
-            import pymupdf  # noqa: F401
+            import pymupdf
         except ImportError:
             self.skipTest("PyMuPDF not installed")
 

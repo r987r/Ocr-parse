@@ -57,6 +57,17 @@ ALLOWED_DOC = {"pdf", "docx", "doc"}
 SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE", "86400"))
 
 # ---------------------------------------------------------------------------
+# PyMuPDF annotation type constants (PDF annotation subtype numbers)
+# See https://pymupdf.readthedocs.io/en/latest/vars.html#annotation-types
+# ---------------------------------------------------------------------------
+_PDF_ANNOT_TEXT      = 0   # sticky note / text annotation
+_PDF_ANNOT_FREETEXT  = 2   # free text annotation
+_PDF_ANNOT_HIGHLIGHT = 8   # yellow highlight
+_PDF_ANNOT_UNDERLINE = 9
+_PDF_ANNOT_SQUIGGLY  = 10
+_PDF_ANNOT_STRIKEOUT = 11
+
+# ---------------------------------------------------------------------------
 # Email / SMTP configuration (all optional – set to enable notifications)
 # ---------------------------------------------------------------------------
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
@@ -948,14 +959,6 @@ def get_pdf_annotations(session_id):
         extracted: list[dict[str, Any]] = []
         doc = pymupdf.open(str(pdf_path))
 
-        # Map PyMuPDF annotation type numbers to readable names
-        _TYPE_TEXT = 0        # sticky note / text annotation
-        _TYPE_HIGHLIGHT = 8   # yellow highlight
-        _TYPE_UNDERLINE = 9
-        _TYPE_SQUIGGLY = 10
-        _TYPE_STRIKEOUT = 11
-        _TYPE_FREETEXT = 2    # free text annotation
-
         for page_num, page in enumerate(doc, start=1):
             for annot in page.annots():
                 atype_num = annot.type[0]
@@ -965,7 +968,7 @@ def get_pdf_annotations(session_id):
                 # For mark-up annotations (highlight, underline, etc.), try to
                 # grab the underlying text when the content field is empty.
                 if not content and atype_num in (
-                    _TYPE_HIGHLIGHT, _TYPE_UNDERLINE, _TYPE_SQUIGGLY, _TYPE_STRIKEOUT
+                    _PDF_ANNOT_HIGHLIGHT, _PDF_ANNOT_UNDERLINE, _PDF_ANNOT_SQUIGGLY, _PDF_ANNOT_STRIKEOUT
                 ):
                     words = page.get_text("words", clip=annot.rect)
                     content = " ".join(w[4] for w in words if len(w) > 4).strip()
@@ -974,9 +977,9 @@ def get_pdf_annotations(session_id):
                     continue
 
                 # Map annotation type to the export comment type
-                if atype_num in (_TYPE_HIGHLIGHT, _TYPE_UNDERLINE):
+                if atype_num in (_PDF_ANNOT_HIGHLIGHT, _PDF_ANNOT_UNDERLINE):
                     export_type = "comment"
-                elif atype_num == _TYPE_STRIKEOUT:
+                elif atype_num == _PDF_ANNOT_STRIKEOUT:
                     export_type = "delete"
                 else:
                     export_type = "comment"

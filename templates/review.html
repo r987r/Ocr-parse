@@ -159,6 +159,13 @@ let debugData    = null;   // debug info from /api/process response
 let ocrDonePages = 0;      // how many pages have been OCR-processed so far
 let pdfAnnotations = [];   // embedded PDF annotations pending import
 
+// Annotation type explanations shown below each annotation's type selector
+const ANN_TYPE_HELP = {
+  comment: 'adds a Word comment balloon at this location',
+  insert:  'inserts new text (tracked change)',
+  delete:  'marks existing text for deletion (tracked change)',
+};
+
 // ============================================================
 // Boot: init (PDF → images), then OCR page by page
 // ============================================================
@@ -340,12 +347,13 @@ async function loadPdfAnnotations() {
 
 function importPdfAnnotations() {
   if (pdfAnnotations.length === 0) return;
+  const importedCount = pdfAnnotations.length;
   pdfAnnotations.forEach(a => annotations.push(a));
   pdfAnnotations = [];
   renderAnnotations();
   saveAnnotations();
   dismissPdfAnnotBanner();
-  showToast(`✅ ${annotations.length} annotation${annotations.length !== 1 ? 's' : ''} imported from PDF.`, 'success');
+  showToast(`✅ ${importedCount} annotation${importedCount !== 1 ? 's' : ''} imported from PDF.`, 'success');
 }
 
 function dismissPdfAnnotBanner() {
@@ -490,12 +498,6 @@ function renderAnnotations() {
     return;
   }
 
-  const typeHelp = {
-    comment: 'adds a Word comment balloon at this location',
-    insert:  'inserts new text (tracked change)',
-    delete:  'marks existing text for deletion (tracked change)',
-  };
-
   list.innerHTML = annotations.map((ann, idx) => `
     <div class="ann-item" data-ann-id="${ann.id}">
       <div class="ann-item-header">
@@ -511,7 +513,7 @@ function renderAnnotations() {
         <button class="btn-icon btn-delete-ann" onclick="deleteAnnotation('${ann.id}')"
                 title="Remove annotation" aria-label="Remove annotation ${idx + 1}">✕</button>
       </div>
-      <p class="ann-page-hint">${typeHelp[ann.type] || ''}</p>
+      <p class="ann-page-hint">${ANN_TYPE_HELP[ann.type] || ''}</p>
       <textarea class="ann-text"
                 placeholder="Enter text for this annotation…"
                 aria-label="Annotation ${idx + 1} text"

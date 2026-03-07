@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OCR Parse – PDF Review Annotation Tool</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <h1>📄 OCR Parse</h1>
+    <p class="tagline">Upload an annotated PDF, review extracted comments, and export a Word document with tracked changes.</p>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="card upload-card">
+    <h2>Step 1 – Upload Your Files</h2>
+
+    <form id="uploadForm">
+
+      <!-- Annotated PDF -->
+      <div class="form-group">
+        <label for="annotated_pdf">
+          <span class="req">*</span> Annotated PDF
+          <small>(required – the PDF with handwritten comments)</small>
+        </label>
+        <input type="file" id="annotated_pdf" name="annotated_pdf" accept=".pdf" required />
+      </div>
+
+      <!-- Original document (optional) -->
+      <div class="form-group">
+        <label for="original_doc">
+          Original Document
+          <small>(optional – .docx or .pdf to use as the base document)</small>
+        </label>
+        <input type="file" id="original_doc" name="original_doc" accept=".pdf,.docx,.doc" />
+      </div>
+
+      <!-- OCR Engine -->
+      <div class="form-group">
+        <label>OCR Engine</label>
+        <div class="ocr-options">
+
+          <label class="radio-card">
+            <input type="radio" name="ocr_engine" value="tesseract" checked />
+            <div class="radio-body">
+              <strong>Tesseract</strong>
+              <span class="badge free">Free &amp; Local</span>
+              <p>Open-source OCR engine. Works well for printed text. Accuracy on handwriting varies.</p>
+            </div>
+          </label>
+
+          <label class="radio-card">
+            <input type="radio" name="ocr_engine" value="openai" />
+            <div class="radio-body">
+              <strong>OpenAI GPT-4o Vision</strong>
+              <span class="badge paid">Paid – API key required</span>
+              <p>Excellent handwriting recognition. Understands context and document structure.</p>
+            </div>
+          </label>
+
+          <label class="radio-card">
+            <input type="radio" name="ocr_engine" value="google" />
+            <div class="radio-body">
+              <strong>Google Cloud Vision</strong>
+              <span class="badge paid">Paid – API key required</span>
+              <p>High-accuracy handwriting detection. Free tier available (1,000 units/month).</p>
+            </div>
+          </label>
+
+        </div>
+      </div>
+
+      <!-- API Key (shown only for paid engines) -->
+      <div class="form-group" id="apiKeyGroup" style="display:none;">
+        <label for="api_key" id="apiKeyLabel">API Key</label>
+        <input type="password" id="api_key" name="api_key"
+               placeholder="Paste your API key here" autocomplete="off" />
+        <small id="apiKeyHint"></small>
+      </div>
+
+      <!-- Submit -->
+      <div class="form-actions">
+        <button type="submit" class="btn-primary" id="uploadBtn">
+          ⬆ Upload &amp; Process
+        </button>
+      </div>
+
+    </form>
+
+    <!-- Progress / Error messages -->
+    <div id="uploadProgress" class="progress-box" style="display:none;">
+      <div class="spinner"></div>
+      <span id="progressMsg">Uploading files…</span>
+    </div>
+    <div id="uploadError" class="error-box" style="display:none;"></div>
+
+  </div><!-- .upload-card -->
+
+  <!-- Info section -->
+  <div class="info-section">
+    <h3>How it works</h3>
+    <ol>
+      <li><strong>Upload</strong> the PDF that has handwritten annotations or typed review comments.</li>
+      <li>Optionally upload the <strong>original document</strong> (.docx) to use as the base for the output.</li>
+      <li>Choose an <strong>OCR engine</strong> – Tesseract is free and works locally; OpenAI and Google Cloud Vision give better results for difficult handwriting.</li>
+      <li><strong>Review</strong> the extracted text blocks side-by-side with the PDF pages, add or edit annotations, and choose each annotation type.</li>
+      <li>Click <strong>"Make File"</strong> to download a Word document (.docx) with all annotations as Word comments and tracked changes.</li>
+    </ol>
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    OCR Parse &mdash; runs locally in your browser &bull; No data is sent to external servers (unless you use a paid OCR engine)
+  </div>
+</footer>
+
+<script>
+  // Show/hide API key field based on engine selection
+  document.querySelectorAll('input[name="ocr_engine"]').forEach(radio => {
+    radio.addEventListener('change', toggleApiKey);
+  });
+
+  function toggleApiKey() {
+    const engine = document.querySelector('input[name="ocr_engine"]:checked').value;
+    const group  = document.getElementById('apiKeyGroup');
+    const label  = document.getElementById('apiKeyLabel');
+    const hint   = document.getElementById('apiKeyHint');
+
+    if (engine === 'openai') {
+      group.style.display = '';
+      label.textContent   = 'OpenAI API Key';
+      hint.innerHTML      = 'Get yours at <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>';
+    } else if (engine === 'google') {
+      group.style.display = '';
+      label.textContent   = 'Google Cloud Credentials JSON (file path on this machine)';
+      hint.innerHTML      = 'Enter the full local path to your service-account JSON key file, '
+                          + 'e.g. <code>C:\\Users\\you\\creds.json</code>. '
+                          + 'See <a href="https://cloud.google.com/vision/docs/setup" target="_blank">Google Cloud Vision setup</a>.';
+    } else {
+      group.style.display = 'none';
+    }
+  }
+
+  // Handle form submit
+  document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const form     = e.target;
+    const progress = document.getElementById('uploadProgress');
+    const errorBox = document.getElementById('uploadError');
+    const btn      = document.getElementById('uploadBtn');
+
+    // Basic validation
+    const annFile = document.getElementById('annotated_pdf').files[0];
+    if (!annFile) {
+      showError('Please select an annotated PDF file.');
+      return;
+    }
+
+    errorBox.style.display  = 'none';
+    progress.style.display  = 'flex';
+    btn.disabled             = true;
+    document.getElementById('progressMsg').textContent = 'Uploading files…';
+
+    const data = new FormData(form);
+
+    try {
+      const resp = await fetch('/upload', { method: 'POST', body: data });
+      const json = await resp.json();
+
+      if (!resp.ok || json.error) {
+        throw new Error(json.error || 'Upload failed.');
+      }
+
+      document.getElementById('progressMsg').textContent = 'Redirecting to review page…';
+      window.location.href = json.redirect;
+
+    } catch (err) {
+      progress.style.display = 'none';
+      btn.disabled            = false;
+      showError(err.message || 'An unexpected error occurred.');
+    }
+  });
+
+  function showError(msg) {
+    const box = document.getElementById('uploadError');
+    box.textContent     = '⚠ ' + msg;
+    box.style.display   = 'block';
+  }
+</script>
+</body>
+</html>

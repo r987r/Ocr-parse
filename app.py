@@ -927,6 +927,83 @@ def get_ocr_results(session_id):
     return jsonify(_load_json(sdir / "ocr_results.json", []))
 
 
+@app.route("/api/pdf_annotations/<session_id>")
+def get_pdf_annotations(session_id):
+    """Extract embedded annotations (sticky notes, highlights, etc.) from the PDF.
+
+    Returns a list of annotation objects compatible with the frontend annotation
+    format so they can be pre-populated in the review interface.
+    """
+    sdir = UPLOAD_BASE / session_id
+    if not sdir.exists():
+        return jsonify({"error": "Session not found."}), 404
+
+    pdf_path = sdir / "annotated.pdf"
+    if not pdf_path.exists():
+        return jsonify({"error": "PDF not found."}), 404
+
+    try:
+        import pymupdf  # PyMuPDF
+
+        extracted: list[dict[str, Any]] = []
+        doc = pymupdf.open(str(pdf_path))
+
+        # Map PyMuPDF annotation type numbers to readable names
+        _TYPE_TEXT = 0        # sticky note / text annotation
+        _TYPE_HIGHLIGHT = 8   # yellow highlight
+        _TYPE_UNDERLINE = 9
+        _TYPE_SQUIGGLY = 10
+        _TYPE_STRIKEOUT = 11
+        _TYPE_FREETEXT = 2    # free text annotation
+
+        for page_num, page in enumerate(doc, start=1):
+            for annot in page.annots():
+                atype_num = annot.type[0]
+                info = annot.info or {}
+                content = (info.get("content") or "").strip()
+
+                # For mark-up annotations (highlight, underline, etc.), try to
+                # grab the underlying text when the content field is empty.
+                if not content and atype_num in (
+                    _TYPE_HIGHLIGHT, _TYPE_UNDERLINE, _TYPE_SQUIGGLY, _TYPE_STRIKEOUT
+                ):
+                    words = page.get_text("words", clip=annot.rect)
+                    content = " ".join(w[4] for w in words if len(w) > 4).strip()
+
+                if not content:
+                    continue
+
+                # Map annotation type to the export comment type
+                if atype_num in (_TYPE_HIGHLIGHT, _TYPE_UNDERLINE):
+                    export_type = "comment"
+                elif atype_num == _TYPE_STRIKEOUT:
+                    export_type = "delete"
+                else:
+                    export_type = "comment"
+
+                title = (info.get("title") or "").strip()
+                subject = (info.get("subject") or "").strip()
+                label_parts = [p for p in [title, subject] if p]
+                label = " – ".join(label_parts) if label_parts else ""
+
+                extracted.append({
+                    "id": f"pdf-annot-{page_num}-{annot.xref}",
+                    "text": (label + ": " + content) if label else content,
+                    "type": export_type,
+                    "page": page_num,
+                    "source": "pdf_annotation",
+                })
+
+        doc.close()
+        return jsonify(extracted)
+
+    except ImportError:
+        return jsonify({"error": "PyMuPDF not installed – cannot extract PDF annotations."}), 501
+    except Exception as exc:
+        logging.exception("Failed to extract PDF annotations for session %s", session_id)
+        return jsonify({"error": f"Failed to extract annotations: {exc}"}), 500
+
+
 @app.route("/api/annotations/<session_id>", methods=["GET"])
 def get_annotations(session_id):
     sdir = UPLOAD_BASE / session_id

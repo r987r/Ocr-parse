@@ -30,6 +30,22 @@ body {
 
 a { color: var(--primary); }
 
+/* ---- Skip-to-content link (accessibility) ---- */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 0;
+  background: var(--primary);
+  color: #fff;
+  padding: .5rem 1rem;
+  z-index: 9999;
+  border-radius: 0 0 var(--radius) 0;
+  font-weight: 600;
+  text-decoration: none;
+  transition: top .15s;
+}
+.skip-link:focus { top: 0; }
+
 /* ---- Container ---- */
 .container {
   max-width: 860px;
@@ -661,12 +677,214 @@ a { color: var(--primary); }
 }
 
 /* ============================================================
+   OCR PROGRESS BAR
+   ============================================================ */
+.ocr-progress-bar-wrap {
+  height: 4px;
+  background: #bfdbfe;
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.ocr-progress-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width .3s ease;
+  border-radius: 2px;
+}
+.ocr-progress-step {
+  font-size: .78rem;
+  color: var(--muted);
+  margin-left: .3rem;
+}
+
+/* ============================================================
+   MOBILE TABS (review page)
+   ============================================================ */
+.mobile-tabs {
+  display: none;
+}
+
+/* ============================================================
+   ANNOTATION TYPE HELP
+   ============================================================ */
+.ann-type-help {
+  display: inline-block;
+  margin-left: .3rem;
+  font-size: .78rem;
+  color: var(--muted);
+  font-weight: 400;
+  font-style: italic;
+}
+.ann-page-hint {
+  font-size: .75rem;
+  color: var(--muted);
+  margin-top: .25rem;
+  padding: .2rem .5rem;
+  background: #f1f5f9;
+  border-radius: 4px;
+  border-left: 3px solid var(--primary);
+}
+
+/* ============================================================
+   PDF ANNOTATION IMPORT BANNER
+   ============================================================ */
+.pdf-annot-banner {
+  display: none;
+  align-items: center;
+  gap: .6rem;
+  padding: .5rem 1rem;
+  background: #fefce8;
+  border-bottom: 1px solid #fde68a;
+  font-size: .85rem;
+  color: #92400e;
+  flex-shrink: 0;
+}
+.pdf-annot-banner.visible { display: flex; }
+.btn-import-annots {
+  margin-left: auto;
+  background: #f59e0b;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: .3rem .8rem;
+  font-size: .8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-import-annots:hover { background: #d97706; }
+.btn-dismiss-annots {
+  background: transparent;
+  border: none;
+  color: #92400e;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: .1rem .3rem;
+}
+
+/* ============================================================
    RESPONSIVE
    ============================================================ */
 @media (max-width: 768px) {
-  .review-layout { flex-direction: column; overflow-y: auto; height: auto; }
-  .review-body   { height: auto; overflow: auto; }
-  .pdf-panel     { flex: none; min-height: 60vh; border-right: none; border-bottom: 1px solid var(--border); }
-  .ann-panel     { flex: none; min-height: 50vh; }
-  .ocr-options   { grid-template-columns: 1fr; }
+  /* --- Header: stack actions on narrow screens --- */
+  .review-header-inner {
+    flex-wrap: wrap;
+    gap: .5rem;
+  }
+  .review-header-inner h1 {
+    font-size: .95rem;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .header-actions {
+    flex-wrap: wrap;
+    gap: .4rem;
+  }
+  .header-actions .btn-primary,
+  .header-actions .btn-danger,
+  .header-actions .btn-secondary,
+  .header-actions .btn-ghost {
+    padding: .55rem .9rem;
+    font-size: .82rem;
+    min-height: 44px; /* WCAG touch target */
+  }
+
+  /* --- Mobile tab bar --- */
+  .mobile-tabs {
+    display: flex;
+    border-bottom: 2px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .mobile-tab {
+    flex: 1;
+    padding: .65rem .5rem;
+    text-align: center;
+    font-size: .88rem;
+    font-weight: 600;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    min-height: 44px;
+    transition: color .15s, border-color .15s;
+  }
+  .mobile-tab.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+  }
+
+  /* --- Review layout: single column with tab switching --- */
+  .review-layout {
+    flex-direction: column;
+    overflow-y: auto;
+    height: auto;
+  }
+  .review-body {
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .review-panels {
+    flex-direction: column;
+    overflow: auto;
+    flex: 1;
+  }
+
+  /* PDF panel takes full screen when active */
+  .pdf-panel {
+    flex: none;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    min-height: 0;
+  }
+  .pdf-panel.tab-hidden,
+  .ann-panel.tab-hidden {
+    display: none;
+  }
+  .pdf-panel.tab-active {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  .ann-panel.tab-active {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+
+  /* OCR blocks section: smaller max-height on mobile */
+  .ocr-blocks-section { max-height: 200px; }
+
+  /* Make add-annotation and nav buttons bigger for touch */
+  .btn-add-ann {
+    padding: .35rem .9rem;
+    font-size: .8rem;
+    min-height: 36px;
+  }
+  .page-nav .btn-ghost {
+    padding: .55rem .9rem;
+    font-size: 1.2rem;
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Upload page: full-width button */
+  .btn-primary { width: 100%; }
+  .form-actions .btn-primary { width: 100%; }
+
+  /* OCR engine grid: always single column */
+  .ocr-options { grid-template-columns: 1fr; }
+
+  /* Toast: wider on mobile */
+  .toast {
+    left: 1rem;
+    right: 1rem;
+    transform: none;
+    text-align: center;
+  }
 }
+

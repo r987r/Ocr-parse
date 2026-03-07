@@ -218,6 +218,96 @@ class TestOCRParse(unittest.TestCase):
         self.assertEqual(config["ocr_engine"], "tesseract")
         self.assertEqual(config["api_key"], "")
 
+    def test_upload_too_large_returns_json_413(self):
+        """When the upload exceeds MAX_CONTENT_LENGTH the 413 handler returns JSON."""
+        # Temporarily set a very small limit so we can trigger it with a tiny payload
+        original_limit = app.config["MAX_CONTENT_LENGTH"]
+        app.config["MAX_CONTENT_LENGTH"] = 1  # 1 byte
+        try:
+            pdf_buf = _make_test_pdf()
+            resp = self.client.post(
+                "/upload",
+                data={"annotated_pdf": (pdf_buf, "big.pdf")},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(resp.status_code, 413)
+            data = json.loads(resp.data)
+            self.assertIn("error", data)
+            self.assertIn("error_type", data)
+            self.assertEqual(data["error_type"], "file_too_large")
+            self.assertIn("too large", data["error"].lower())
+        finally:
+            app.config["MAX_CONTENT_LENGTH"] = original_limit
+
+    def test_debug_log_endpoints(self):
+        """Debug log is empty by default; upload failure with debug_mode stores an entry."""
+        import app as app_module
+        from pathlib import Path as _Path
+
+        # Point the debug log to the test upload directory
+        original_path = app_module.DEBUG_LOG_PATH
+        app_module.DEBUG_LOG_PATH = _Path(_test_upload_dir) / "debug_log.json"
+        # Ensure it starts empty
+        if app_module.DEBUG_LOG_PATH.exists():
+            app_module.DEBUG_LOG_PATH.unlink()
+
+        try:
+            # GET debug log – should be empty
+            resp = self.client.get("/api/debug/log")
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(json.loads(resp.data), [])
+
+            # Trigger a failure with debug_mode=1 (wrong file type)
+            resp = self.client.post(
+                "/upload",
+                data={
+                    "annotated_pdf": (io.BytesIO(b"not a pdf"), "test.txt"),
+                    "debug_mode": "1",
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(resp.status_code, 400)
+
+            # Debug log should now have one entry
+            resp = self.client.get("/api/debug/log")
+            log = json.loads(resp.data)
+            self.assertEqual(len(log), 1)
+            self.assertEqual(log[0]["event"], "upload_failed")
+            self.assertIn("error_type", log[0])
+
+            # Clear the log
+            resp = self.client.post("/api/debug/clear")
+            self.assertEqual(resp.status_code, 200)
+
+            # Confirm it is empty again
+            resp = self.client.get("/api/debug/log")
+            self.assertEqual(json.loads(resp.data), [])
+
+        finally:
+            app_module.DEBUG_LOG_PATH = original_path
+
+    def test_debug_mode_off_does_not_store_log(self):
+        """Upload failure without debug_mode=1 does NOT write to debug log."""
+        import app as app_module
+        from pathlib import Path as _Path
+
+        original_path = app_module.DEBUG_LOG_PATH
+        app_module.DEBUG_LOG_PATH = _Path(_test_upload_dir) / "debug_log_off.json"
+        if app_module.DEBUG_LOG_PATH.exists():
+            app_module.DEBUG_LOG_PATH.unlink()
+
+        try:
+            # Wrong file type, debug_mode NOT set
+            self.client.post(
+                "/upload",
+                data={"annotated_pdf": (io.BytesIO(b"not a pdf"), "test.txt")},
+                content_type="multipart/form-data",
+            )
+            # Log file should not have been created
+            self.assertFalse(app_module.DEBUG_LOG_PATH.exists())
+        finally:
+            app_module.DEBUG_LOG_PATH = original_path
+
 
 class TestOCREngine(unittest.TestCase):
     """Unit tests for OCR engine."""

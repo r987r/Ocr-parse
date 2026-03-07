@@ -14,6 +14,7 @@ import time
 import threading
 import logging
 from pathlib import Path
+from typing import Any
 
 from flask import (
     Flask,
@@ -48,6 +49,10 @@ ALLOWED_DOC = {"pdf", "docx", "doc"}
 # Session auto-cleanup: delete session files after this many seconds
 SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE", "1800"))  # 30 min
 
+# Debug log: persists failure metadata when the user opts in via the UI
+DEBUG_LOG_PATH = UPLOAD_BASE / "debug_log.json"
+_debug_log_lock = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,6 +79,41 @@ def _load_json(path: Path, default=None):
 def _save_json(path: Path, data):
     with path.open("w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _append_debug_log(entry: dict[str, Any]):
+    """Append one failure entry to the persistent debug log (max 200 entries)."""
+    with _debug_log_lock:
+        log = _load_json(DEBUG_LOG_PATH, [])
+        log.append(entry)
+        if len(log) > 200:
+            log = log[-200:]
+        _save_json(DEBUG_LOG_PATH, log)
+
+
+def _log_upload_failure(
+    debug_mode: bool,
+    error_msg: str,
+    error_type: str,
+    extra: dict[str, Any] | None = None,
+):
+    """Log an upload failure to the server log; persist metadata when debug mode is on."""
+    logging.warning("Upload failed [%s]: %s", error_type, error_msg)
+    if debug_mode:
+        entry: dict[str, Any] = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "event": "upload_failed",
+            "error_type": error_type,
+            "error": error_msg,
+        }
+        ann = request.files.get("annotated_pdf")
+        if ann and ann.filename:
+            entry["filename"] = secure_filename(ann.filename)
+        if request.content_length:
+            entry["content_length_bytes"] = request.content_length
+        if extra:
+            entry.update(extra)
+        _append_debug_log(entry)
 
 
 def _cleanup_session(session_id: str):
@@ -117,7 +157,25 @@ _start_cleanup_timer()
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    max_upload_mb = app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024)
+    return render_template("index.html", max_upload_mb=max_upload_mb)
+
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    """Return a clear JSON error when the uploaded file exceeds MAX_CONTENT_LENGTH."""
+    max_mb = app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024)
+    msg = (
+        f"Upload failed: the file is too large. "
+        f"The maximum allowed upload size is {max_mb} MB. "
+        f"Please reduce your file size and try again."
+    )
+    logging.warning(
+        "Upload rejected – request entity too large (413). "
+        "Content-Length header: %s bytes",
+        request.content_length,
+    )
+    return jsonify({"error": msg, "error_type": "file_too_large"}), 413
 
 
 @app.route("/health")
@@ -129,18 +187,31 @@ def health():
 @app.route("/upload", methods=["POST"])
 def upload():
     """Receive uploaded files, start a session, redirect to review page."""
+    debug_mode = request.form.get("debug_mode") == "1"
+
     if "annotated_pdf" not in request.files:
+        _log_upload_failure(debug_mode, "No annotated PDF file provided.", "missing_file")
         return jsonify({"error": "No annotated PDF file provided."}), 400
 
     ann_file = request.files["annotated_pdf"]
     if not ann_file.filename or not _allowed(ann_file.filename, ALLOWED_PDF):
+        _log_upload_failure(
+            debug_mode,
+            f"Invalid file type: '{ann_file.filename}'.",
+            "invalid_file_type",
+            {"filename": secure_filename(ann_file.filename or "")},
+        )
         return jsonify({"error": "Please upload a PDF file for the annotated document."}), 400
 
     session_id = str(uuid.uuid4())
     sdir = _session_dir(session_id)
 
     # Save annotated PDF
-    ann_file.save(str(sdir / "annotated.pdf"))
+    try:
+        ann_file.save(str(sdir / "annotated.pdf"))
+    except Exception as exc:
+        _log_upload_failure(debug_mode, f"File save failed: {exc}", "save_error")
+        return jsonify({"error": f"Failed to save uploaded file: {exc}"}), 500
 
     # Save optional original document
     has_original = False
@@ -318,6 +389,20 @@ def export_document(session_id):
 def cleanup(session_id):
     """Delete all session files (no document retention)."""
     _cleanup_session(session_id)
+    return jsonify({"success": True})
+
+
+@app.route("/api/debug/log")
+def get_debug_log():
+    """Return stored debug log entries (upload failure metadata)."""
+    return jsonify(_load_json(DEBUG_LOG_PATH, []))
+
+
+@app.route("/api/debug/clear", methods=["POST"])
+def clear_debug_log():
+    """Clear all stored debug log entries."""
+    with _debug_log_lock:
+        _save_json(DEBUG_LOG_PATH, [])
     return jsonify({"success": True})
 
 

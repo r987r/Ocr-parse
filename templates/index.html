@@ -47,6 +47,19 @@
         </button>
       </div>
 
+      <!-- Debug / Privacy toggle -->
+      <div class="debug-toggle">
+        <label class="checkbox-label">
+          <input type="checkbox" id="debug_mode" name="debug_mode" value="1" />
+          <span>Enable diagnostic logging on upload errors</span>
+        </label>
+        <p class="privacy-note">
+          🔒 <strong>Privacy:</strong> When enabled, if an upload fails, basic metadata
+          (filename, file size, error type) is stored on the server to help diagnose the
+          issue. <strong>No file content is ever stored.</strong> Uncheck to opt out.
+        </p>
+      </div>
+
     </form>
 
     <!-- Progress / Error messages -->
@@ -98,6 +111,19 @@
       return;
     }
 
+    // Client-side file size guard – gives an instant, specific message
+    // NOTE: max size is rendered from server config (app.config["MAX_CONTENT_LENGTH"])
+    const maxBytes = {{ max_upload_mb }} * 1024 * 1024;
+    if (annFile.size > maxBytes) {
+      const sizeMB = (annFile.size / 1024 / 1024).toFixed(1);
+      showError(
+        `File too large: ${sizeMB} MB. ` +
+        `The maximum allowed upload size is {{ max_upload_mb }} MB. ` +
+        `Please reduce your file size and try again.`
+      );
+      return;
+    }
+
     errorBox.style.display  = 'none';
     progress.style.display  = 'flex';
     btn.disabled             = true;
@@ -107,10 +133,24 @@
 
     try {
       const resp = await fetch('/upload', { method: 'POST', body: data });
-      const json = await resp.json();
+
+      // Parse JSON response; handle non-JSON bodies (e.g. unexpected HTML errors)
+      let json;
+      try {
+        json = await resp.json();
+      } catch (_parseErr) {
+        if (resp.status === 413) {
+          throw new Error(
+            'Upload failed: the file is too large (HTTP 413). ' +
+            'The maximum allowed upload size is {{ max_upload_mb }} MB. ' +
+            'Please reduce your file size and try again.'
+          );
+        }
+        throw new Error(`Upload failed (HTTP ${resp.status}). Please try again.`);
+      }
 
       if (!resp.ok || json.error) {
-        throw new Error(json.error || 'Upload failed.');
+        throw new Error(json.error || `Upload failed (HTTP ${resp.status}).`);
       }
 
       document.getElementById('progressMsg').textContent = 'Redirecting to review page…';

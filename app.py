@@ -2,18 +2,24 @@
 OCR Parse - PDF Review Annotation Web App
 Flask application entry point.
 
-Uses Tesseract (free, local) for OCR. No document retention – session
-files are deleted after export or automatically after a timeout.
+Uses Tesseract (free, local) for OCR.  Documents are stored for up to
+24 hours.  A unique access token is emailed to the uploader so they can
+return to their document at any time within that window.
 """
 
 import os
+import re
 import uuid
 import json
 import shutil
 import time
+import secrets
+import smtplib
 import threading
 import logging
 import subprocess
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +53,17 @@ UPLOAD_BASE.mkdir(exist_ok=True)
 ALLOWED_PDF = {"pdf"}
 ALLOWED_DOC = {"pdf", "docx", "doc"}
 
-# Session auto-cleanup: delete session files after this many seconds
-SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE", "1800"))  # 30 min
+# Session auto-cleanup: delete session files after this many seconds (default 24 h)
+SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE", "86400"))
+
+# ---------------------------------------------------------------------------
+# Email / SMTP configuration (all optional – set to enable notifications)
+# ---------------------------------------------------------------------------
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
 
 # Debug mode: set DEBUG_MODE=1 to include verbose processing info in API
 # responses and on the review page.  Disable for production deployments.
@@ -57,6 +72,43 @@ DEBUG_MODE = os.environ.get("DEBUG_MODE", "1") == "1"
 # Debug log: persists failure metadata when the user opts in via the UI
 DEBUG_LOG_PATH = UPLOAD_BASE / "debug_log.json"
 _debug_log_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Access-token registry
+# ---------------------------------------------------------------------------
+# Maps a 256-bit URL-safe token → session UUID so email links are unguessable.
+# Stored in uploads/tokens.json (separate from individual session dirs).
+_tokens_lock = threading.Lock()
+
+
+def _tokens_file() -> Path:
+    """Return the path to the token registry (evaluated dynamically so test
+    overrides of UPLOAD_BASE are respected)."""
+    return UPLOAD_BASE / "tokens.json"
+
+
+def _register_token(token: str, session_id: str) -> None:
+    """Persist a new token → session_id mapping."""
+    with _tokens_lock:
+        registry = _load_json(_tokens_file(), {})
+        registry[token] = session_id
+        _save_json(_tokens_file(), registry)
+
+
+def _get_session_for_token(token: str) -> "str | None":
+    """Return the session_id for *token*, or ``None`` if not found."""
+    with _tokens_lock:
+        registry = _load_json(_tokens_file(), {})
+        return registry.get(token)
+
+
+def _unregister_tokens_for_session(session_id: str) -> None:
+    """Remove every token that maps to *session_id*."""
+    with _tokens_lock:
+        registry = _load_json(_tokens_file(), {})
+        updated = {k: v for k, v in registry.items() if v != session_id}
+        if len(updated) != len(registry):
+            _save_json(_tokens_file(), updated)
 
 
 # ---------------------------------------------------------------------------
@@ -122,25 +174,33 @@ def _log_upload_failure(
 
 
 def _cleanup_session(session_id: str):
-    """Remove all files for a session (no document retention)."""
+    """Remove all files for a session and deregister its access token."""
+    _unregister_tokens_for_session(session_id)
     sdir = UPLOAD_BASE / session_id
     if sdir.exists():
         shutil.rmtree(sdir, ignore_errors=True)
 
 
 def _cleanup_old_sessions():
-    """Remove sessions older than SESSION_MAX_AGE_SECONDS."""
+    """Remove sessions older than SESSION_MAX_AGE_SECONDS and purge their tokens."""
     now = time.time()
     if not UPLOAD_BASE.exists():
         return
+    removed: list[str] = []
     for child in UPLOAD_BASE.iterdir():
         if child.is_dir():
             try:
                 age = now - child.stat().st_mtime
                 if age > SESSION_MAX_AGE_SECONDS:
                     shutil.rmtree(child, ignore_errors=True)
+                    removed.append(child.name)
             except OSError:
                 pass
+    if removed:
+        with _tokens_lock:
+            registry = _load_json(_tokens_file(), {})
+            registry = {k: v for k, v in registry.items() if v not in removed}
+            _save_json(_tokens_file(), registry)
 
 
 def _start_cleanup_timer():
@@ -222,6 +282,75 @@ def _get_system_debug_info() -> dict[str, Any]:
         pass
 
     return info
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _is_valid_email(email: str) -> bool:
+    return bool(_EMAIL_RE.match(email))
+
+
+def _send_notification_email(to_email: str, base_url: str, access_token: str) -> None:
+    """Send a processing-complete notification with a unique document link.
+
+    Silently logs and returns when SMTP is not configured so callers never
+    have to worry about error handling.
+    """
+    review_url = f"{base_url.rstrip('/')}/r/{access_token}"
+
+    if not SMTP_HOST or not SMTP_USER:
+        logging.info(
+            "Email notification skipped (SMTP not configured). Review link: %s",
+            review_url,
+        )
+        return
+
+    subject = "Your OCR Parse document is ready"
+
+    text_body = (
+        "Your document has finished processing and is ready for review.\n\n"
+        f"Access your document here (valid for 24 hours):\n{review_url}\n\n"
+        "Once you are done reviewing and exporting, you can delete the document "
+        "from the review page.\n\n"
+        "– OCR Parse"
+    )
+
+    html_body = (
+        '<html><body style="font-family:Arial,sans-serif;max-width:600px;'
+        'margin:0 auto;padding:20px">'
+        '<h2 style="color:#2563eb">📄 Your document is ready</h2>'
+        "<p>Your OCR Parse document has finished processing and is ready for review.</p>"
+        '<p style="margin:24px 0">'
+        f'<a href="{review_url}" style="background:#2563eb;color:white;padding:12px 24px;'
+        'text-decoration:none;border-radius:6px;display:inline-block">'
+        "📄 Open Your Document →</a>"
+        "</p>"
+        "<p><strong>⏰ This link will expire in 24 hours.</strong></p>"
+        "<p>Once you are done reviewing and exporting your document, you can "
+        "delete it from the review page.</p>"
+        '<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">'
+        '<p style="font-size:12px;color:#6b7280">OCR Parse – Free Tesseract OCR. '
+        "Your document will be automatically deleted after 24 hours.</p>"
+        "</body></html>"
+    )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, to_email, msg.as_string())
+        logging.info("Notification email sent to %s", to_email)
+    except Exception as exc:
+        logging.warning("Failed to send notification email to %s: %s", to_email, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +438,13 @@ def upload():
         )
         return jsonify({"error": "Please upload a PDF file for the annotated document."}), 400
 
+    # Optional email for completion notification
+    email = request.form.get("email", "").strip()
+    if email and not _is_valid_email(email):
+        return jsonify({"error": "Please enter a valid email address."}), 400
+
     session_id = str(uuid.uuid4())
+    access_token = secrets.token_urlsafe(32)
     sdir = _session_dir(session_id)
 
     # Save annotated PDF
@@ -336,9 +471,15 @@ def upload():
         "api_key": "",
         "has_original": has_original,
         "orig_ext": orig_ext,
+        "email": email,
+        "access_token": access_token,
+        "base_url": request.host_url,
+        "email_sent": False,
     }
     _save_json(sdir / "config.json", config)
     _save_json(sdir / "annotations.json", [])
+
+    _register_token(access_token, session_id)
 
     return jsonify({"session_id": session_id, "redirect": f"/review/{session_id}"})
 
@@ -355,9 +496,27 @@ def review(session_id):
     return render_template("review.html", session_id=session_id, config=config, debug_mode=DEBUG_MODE)
 
 
+@app.route("/r/<access_token>")
+def token_redirect(access_token):
+    """Redirect a unique email access token to the corresponding review session."""
+    if not re.match(r"^[A-Za-z0-9_-]+$", access_token):
+        abort(404)
+    session_id = _get_session_for_token(access_token)
+    if not session_id:
+        abort(404)
+    sdir = UPLOAD_BASE / session_id
+    if not sdir.exists():
+        abort(404)
+    return redirect(url_for("review", session_id=session_id))
+
+
 @app.route("/api/process/<session_id>", methods=["POST"])
 def process(session_id):
-    """Convert PDF to images and run OCR on each page."""
+    """Convert PDF to images and run OCR on each page.
+
+    Results are cached: if OCR has already been run for this session the
+    cached data is returned immediately without re-processing.
+    """
     sdir = UPLOAD_BASE / session_id
     if not sdir.exists():
         return jsonify({"error": "Session not found."}), 404
@@ -366,6 +525,27 @@ def process(session_id):
     pdf_path = sdir / "annotated.pdf"
     if not pdf_path.exists():
         return jsonify({"error": "Annotated PDF not found."}), 404
+
+    # ------------------------------------------------------------------
+    # Return cached results if OCR has already been run for this session
+    # ------------------------------------------------------------------
+    cached_path = sdir / "ocr_results.json"
+    pages_dir = sdir / "pages"
+    if cached_path.exists() and pages_dir.exists() and any(pages_dir.glob("*.png")):
+        cached_results = _load_json(cached_path, [])
+        if cached_results:
+            resp: dict[str, Any] = {
+                "success": True,
+                "num_pages": len(cached_results),
+                "results": cached_results,
+                "cached": True,
+            }
+            if DEBUG_MODE:
+                cache_debug = _get_system_debug_info()
+                cache_debug["session_id"] = session_id
+                cache_debug["cached"] = True
+                resp["debug"] = cache_debug
+            return jsonify(resp)
 
     # Collect debug info when debug mode is active
     debug_info: dict[str, Any] = {}
@@ -458,6 +638,20 @@ def process(session_id):
             ocr_results.append({"page": idx + 1, "blocks": blocks})
 
         _save_json(sdir / "ocr_results.json", ocr_results)
+
+        # Send notification email once (in a daemon thread so it doesn't delay the response)
+        email = config.get("email", "")
+        if email and not config.get("email_sent"):
+            config["email_sent"] = True
+            _save_json(sdir / "config.json", config)
+            _base_url = config.get("base_url", "")
+            _token = config.get("access_token", "")
+            t = threading.Thread(
+                target=_send_notification_email,
+                args=(email, _base_url, _token),
+                daemon=True,
+            )
+            t.start()
 
         # Build response
         resp: dict[str, Any] = {

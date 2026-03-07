@@ -433,7 +433,132 @@ class TestOCRParse(unittest.TestCase):
             app_module.DEBUG_MODE = original_debug
 
 
-class TestOCREngine(unittest.TestCase):
+    def test_upload_stores_email_and_token(self):
+        """Upload with email stores email and access token in session config."""
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf"), "email": "tester@example.com"},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        config_path = Path(_test_upload_dir) / session_id / "config.json"
+        with open(config_path) as f:
+            config = json.load(f)
+
+        self.assertEqual(config["email"], "tester@example.com")
+        self.assertIn("access_token", config)
+        self.assertGreater(len(config["access_token"]), 20)
+
+    def test_upload_invalid_email_rejected(self):
+        """Upload with an invalid email address returns 400."""
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf"), "email": "not-an-email"},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = json.loads(resp.data)
+        self.assertIn("email", data["error"].lower())
+
+    def test_upload_without_email_still_works(self):
+        """Upload without email succeeds and config has empty email."""
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        config_path = Path(_test_upload_dir) / data["session_id"] / "config.json"
+        with open(config_path) as f:
+            config = json.load(f)
+        self.assertEqual(config["email"], "")
+
+    def test_access_token_redirect(self):
+        """The /r/<token> route redirects to the review page."""
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf"), "email": "user@example.com"},
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        config_path = Path(_test_upload_dir) / session_id / "config.json"
+        with open(config_path) as f:
+            config = json.load(f)
+        access_token = config["access_token"]
+
+        resp = self.client.get(f"/r/{access_token}")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(f"/review/{session_id}", resp.headers.get("Location", ""))
+
+    def test_access_token_invalid_returns_404(self):
+        """An unknown or malformed access token returns 404."""
+        self.assertEqual(self.client.get("/r/nonexistent-token").status_code, 404)
+        self.assertEqual(self.client.get("/r/../../etc/passwd").status_code, 404)
+
+    def test_cleanup_removes_token(self):
+        """Cleanup removes the access token from the registry."""
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf"), "email": "user@example.com"},
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        config_path = Path(_test_upload_dir) / session_id / "config.json"
+        with open(config_path) as f:
+            config = json.load(f)
+        access_token = config["access_token"]
+
+        # Token works before cleanup
+        resp = self.client.get(f"/r/{access_token}")
+        self.assertEqual(resp.status_code, 302)
+
+        # Cleanup
+        self.client.post(f"/api/cleanup/{session_id}")
+
+        # Token no longer resolves
+        resp = self.client.get(f"/r/{access_token}")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_process_returns_cached_results_on_second_call(self):
+        """Second call to /api/process returns cached results instantly."""
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        # First call – processes normally
+        resp = self.client.post(f"/api/process/{session_id}")
+        self.assertEqual(resp.status_code, 200)
+        first_data = json.loads(resp.data)
+        self.assertTrue(first_data["success"])
+        self.assertFalse(first_data.get("cached", False))
+
+        # Second call – should serve cached results
+        resp = self.client.post(f"/api/process/{session_id}")
+        self.assertEqual(resp.status_code, 200)
+        second_data = json.loads(resp.data)
+        self.assertTrue(second_data["success"])
+        self.assertTrue(second_data.get("cached", False))
+
+
+
     """Unit tests for OCR engine."""
 
     def test_tesseract_extract(self):

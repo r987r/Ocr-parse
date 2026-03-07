@@ -153,6 +153,19 @@ a { color: var(--primary); }
 }
 .btn-secondary:hover { background: #eff6ff; }
 
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  padding: .65rem 1.4rem;
+  border-radius: var(--radius);
+  font-size: .95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.btn-danger:hover { background: #b91c1c; }
+
 .btn-ghost {
   background: transparent;
   color: var(--text);

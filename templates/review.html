@@ -304,11 +304,22 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
     URL.revokeObjectURL(url);
 
     showToast('✅ Document exported successfully!', 'success');
+
+    // Clean up server-side session data (no document retention)
+    try {
+      await fetch(`/api/cleanup/${SESSION_ID}`, { method: 'POST' });
+    } catch (cleanupErr) { console.warn('Session cleanup failed:', cleanupErr); }
+
   } catch (err) {
     showToast('⚠ ' + err.message, 'error');
   } finally {
     document.getElementById('exportOverlay').style.display = 'none';
   }
+});
+
+// Clean up session when user leaves the page
+window.addEventListener('beforeunload', () => {
+  navigator.sendBeacon(`/api/cleanup/${SESSION_ID}`);
 });
 
 // ============================================================

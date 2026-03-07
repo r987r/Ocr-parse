@@ -36,3 +36,9 @@ desktop.ini
 # Distribution
 *.tar.gz
 *.zip
+
+# Docker
+docker-compose.override.yml
+
+# Test artifacts
+test_output/

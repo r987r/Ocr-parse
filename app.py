@@ -815,4 +815,4 @@ if __name__ == "__main__":
     print("=" * 60)
     print()
     debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(debug=debug_mode, host="0.0.0.0", port=5000)
+    app.run(debug=debug_mode, host="0.0.0.0", port=5000)  # nosec B104 – dev server only; production uses Gunicorn

@@ -33,15 +33,22 @@
 <div id="processingOverlay" class="overlay">
   <div class="overlay-card">
     <div class="spinner large"></div>
-    <p id="overlayMsg">Processing PDF with OCR…</p>
-    <small>This may take a minute for large documents.</small>
+    <p id="overlayMsg">Preparing pages…</p>
+    <small>Converting PDF to images, please wait.</small>
   </div>
 </div>
 
 <!-- ===== Main layout ===== -->
 <div class="review-layout" id="reviewLayout" style="display:none;">
 
+  <!-- OCR progress banner (hidden once all pages are done) -->
+  <div id="ocrProgressBanner" class="ocr-progress-banner" style="display:none;">
+    <div class="spinner"></div>
+    <span id="ocrProgressText">Extracting text…</span>
+  </div>
+
   <!-- LEFT: PDF Pages viewer -->
+  <div class="review-panels">
   <section class="pdf-panel" id="pdfPanel">
     <div class="panel-header">
       <h2>PDF Pages</h2>
@@ -82,6 +89,7 @@
       <span class="legend-item"><span class="type-pill delete">delete</span> Tracked deletion</span>
     </div>
   </section>
+  </div><!-- .review-panels -->
 
 </div><!-- .review-layout -->
 
@@ -126,61 +134,138 @@ let annotations  = [];     // [{id, text, type, page}]
 let currentPage  = 1;
 let totalPages   = 1;
 let debugData    = null;   // debug info from /api/process response
+let ocrDonePages = 0;      // how many pages have been OCR-processed so far
 
 // ============================================================
-// Boot: run OCR on page load
+// Boot: init (PDF → images), then OCR page by page
 // ============================================================
 window.addEventListener('DOMContentLoaded', async () => {
-  showOverlay('Processing PDF with OCR…');
+  showOverlay('Preparing pages…');
   try {
-    const resp = await fetch(`/api/process/${SESSION_ID}`, { method: 'POST' });
-
-    // Guard against non-JSON responses (e.g. HTML 500/504 from gunicorn)
-    let json;
+    // Step 1: convert PDF to page images, get page count
+    const initResp = await fetch(`/api/process/${SESSION_ID}/init`, { method: 'POST' });
+    let initJson;
     try {
-      json = await resp.json();
-    } catch (_parseErr) {
+      initJson = await initResp.json();
+    } catch (_) {
       throw new Error(
-        `Processing failed (HTTP ${resp.status}). ` +
+        `Init failed (HTTP ${initResp.status}). ` +
         'The server returned an unexpected response. Please try again.'
       );
     }
-
-    if (!resp.ok || json.error) {
-      // Capture debug data from error responses too
-      if (json.debug) {
-        debugData = json.debug;
-      }
-      throw new Error(json.error || 'Processing failed.');
+    if (!initResp.ok || initJson.error) {
+      if (initJson.debug) debugData = initJson.debug;
+      throw new Error(initJson.error || 'Failed to prepare pages.');
     }
 
-    ocrResults = json.results || [];
-    totalPages = json.num_pages || 1;
+    totalPages = initJson.num_pages || 1;
 
-    // Capture debug info if present
-    if (json.debug) {
-      debugData = json.debug;
-      if (DEBUG_MODE) renderDebugPanel();
-    }
+    // Load saved annotations
+    const annResp  = await fetch(`/api/annotations/${SESSION_ID}`);
+    const annJson  = await annResp.json();
+    annotations    = Array.isArray(annJson) ? annJson : [];
 
-    // Load any saved annotations
-    const annResp = await fetch(`/api/annotations/${SESSION_ID}`);
-    const annJson = await annResp.json();
-    annotations   = Array.isArray(annJson) ? annJson : [];
-
+    // Show the review layout with the first page immediately
     hideOverlay();
     document.getElementById('reviewLayout').style.display = 'flex';
     renderPage(1);
     renderAnnotations();
 
+    // Step 2: if full OCR cache already exists, load it and we're done
+    if (initJson.fully_cached) {
+      const cacheResp = await fetch(`/api/ocr_results/${SESSION_ID}`);
+      const cacheJson = await cacheResp.json();
+      if (Array.isArray(cacheJson) && cacheJson.length > 0) {
+        ocrResults   = cacheJson;
+        ocrDonePages = cacheJson.length;
+        renderOcrBlocksForPage(currentPage);
+        return;
+      }
+    }
+
+    // Step 3: OCR each page one at a time
+    showOcrProgress(0, totalPages);
+    for (let p = 1; p <= totalPages; p++) {
+      updateOcrProgress(p, totalPages);
+      await ocrOnePage(p);
+      // Refresh OCR blocks if user is still on this page
+      if (p === currentPage) {
+        renderOcrBlocksForPage(currentPage);
+      }
+    }
+    hideOcrProgress();
+
   } catch (err) {
-    document.getElementById('overlayMsg').textContent = '⚠ ' + err.message;
-    document.querySelector('#processingOverlay small').textContent =
-      'Please go back and try again, or check your OCR engine setup.';
-    // Show debug panel on error if available
+    // If the review layout is already visible (init succeeded, error happened later),
+    // show a toast instead of re-covering the page with the overlay.
+    if (document.getElementById('reviewLayout').style.display !== 'none') {
+      hideOcrProgress();
+      showToast('⚠ ' + err.message, 'error');
+    } else {
+      document.getElementById('overlayMsg').textContent = '⚠ ' + err.message;
+      document.querySelector('#processingOverlay small').textContent =
+        'Please go back and try again, or check your OCR engine setup.';
+    }
     if (DEBUG_MODE && debugData) renderDebugPanel();
   }
 });
+
+// ============================================================
+// OCR one page via the per-page endpoint
+// ============================================================
+async function ocrOnePage(pageNum) {
+  try {
+    const resp = await fetch(`/api/process/${SESSION_ID}/page/${pageNum}`, { method: 'POST' });
+    let json;
+    try { json = await resp.json(); } catch (e) { json = { error: 'Invalid server response' }; }
+
+    if (!resp.ok || json.error) {
+      // Store an error block so the user still sees something
+      const existing = ocrResults.find(r => r.page === pageNum);
+      if (!existing) {
+        ocrResults.push({ page: pageNum, blocks: [{ text: `[OCR failed: ${json.error || 'unknown error'}]`, confidence: 0, block_num: 0 }] });
+      }
+      return;
+    }
+
+    if (json.debug) debugData = json.debug;
+
+    // Store / update the result for this page
+    const idx = ocrResults.findIndex(r => r.page === pageNum);
+    const entry = { page: pageNum, blocks: json.blocks || [] };
+    if (idx >= 0) {
+      ocrResults[idx] = entry;
+    } else {
+      ocrResults.push(entry);
+    }
+    ocrDonePages = ocrResults.length;
+
+  } catch (err) {
+    // Network error – add placeholder so navigation still works
+    if (!ocrResults.find(r => r.page === pageNum)) {
+      ocrResults.push({ page: pageNum, blocks: [{ text: '[OCR error – network failure]', confidence: 0, block_num: 0 }] });
+    }
+  }
+}
+
+// ============================================================
+// OCR progress banner
+// ============================================================
+function showOcrProgress(done, total) {
+  const banner = document.getElementById('ocrProgressBanner');
+  banner.style.display = 'flex';
+  updateOcrProgress(done, total);
+}
+
+function updateOcrProgress(done, total) {
+  const el = document.getElementById('ocrProgressText');
+  if (el) el.textContent = `Extracting text — page ${done} of ${total}…`;
+}
+
+function hideOcrProgress() {
+  const banner = document.getElementById('ocrProgressBanner');
+  if (banner) banner.style.display = 'none';
+}
 
 // ============================================================
 // Page navigation
@@ -203,9 +288,18 @@ function renderPage(pageNum) {
   img.src = `/api/page/${SESSION_ID}/${pageNum}`;
   img.alt = `Page ${pageNum}`;
 
-  // Render OCR blocks for this page
+  renderOcrBlocksForPage(pageNum);
+}
+
+function renderOcrBlocksForPage(pageNum) {
   const pageData = ocrResults.find(r => r.page === pageNum);
-  renderOcrBlocks(pageData ? pageData.blocks : []);
+  if (pageData) {
+    renderOcrBlocks(pageData.blocks);
+  } else {
+    // OCR for this page hasn't been fetched yet
+    document.getElementById('ocrBlocksList').innerHTML =
+      '<p class="muted"><span class="spinner" style="display:inline-block;vertical-align:middle;margin-right:.4rem"></span>Extracting text for this page…</p>';
+  }
 }
 
 function renderOcrBlocks(blocks) {

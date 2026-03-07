@@ -324,6 +324,28 @@ a { color: var(--primary); }
   display: flex;
   flex: 1;
   overflow: hidden;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* OCR progress banner – shown above the two panels while OCR is running */
+.ocr-progress-banner {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .45rem 1rem;
+  background: #eff6ff;
+  border-bottom: 1px solid #bfdbfe;
+  font-size: .85rem;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+/* The two panels sit side-by-side inside the layout */
+.review-panels {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
   gap: 0;
 }
 

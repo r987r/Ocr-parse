@@ -558,7 +558,7 @@ class TestOCRParse(unittest.TestCase):
         self.assertTrue(second_data.get("cached", False))
 
 
-
+class TestOCREngine(unittest.TestCase):
     """Unit tests for OCR engine."""
 
     def test_tesseract_extract(self):

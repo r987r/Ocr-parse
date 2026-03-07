@@ -122,8 +122,8 @@
       return;
     }
 
-    # Optional email for completion notification
-    # NOTE: validation regex here matches _EMAIL_RE in app.py – keep in sync
+    // Optional email for completion notification
+    // NOTE: validation regex here matches _EMAIL_RE in app.py – keep in sync
     const emailVal = document.getElementById('email').value.trim();
     if (emailVal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal)) {
       showError('Please enter a valid email address.');

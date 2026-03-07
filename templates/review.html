@@ -78,6 +78,8 @@
         <button class="btn-ghost" id="prevPage" aria-label="Previous page">&#8249;</button>
         <span id="pageIndicator" aria-live="polite">1 / 1</span>
         <button class="btn-ghost" id="nextPage" aria-label="Next page">&#8250;</button>
+        <input type="number" id="pageJumpInput" class="page-jump-input" min="1" value="1"
+               aria-label="Jump to page" title="Jump to page (press Enter)" />
       </div>
     </div>
     <div class="pdf-page-container" id="pdfPageContainer">
@@ -180,13 +182,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       initJson = await initResp.json();
     } catch (_) {
       throw new Error(
-        `Init failed (HTTP ${initResp.status}). ` +
-        'The server returned an unexpected response. Please try again.'
+        `Could not prepare pages (HTTP ${initResp.status}). ` +
+        'The server may be busy or the PDF is too large. Please try refreshing the page.'
       );
     }
     if (!initResp.ok || initJson.error) {
       if (initJson.debug) debugData = initJson.debug;
-      throw new Error(initJson.error || 'Failed to prepare pages.');
+      throw new Error(initJson.error || 'Failed to prepare pages. Please try refreshing.');
     }
 
     totalPages = initJson.num_pages || 1;
@@ -241,26 +243,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     } else {
       document.getElementById('overlayMsg').textContent = '⚠ ' + err.message;
       document.querySelector('#processingOverlay small').textContent =
-        'Please go back and try again, or check your OCR engine setup.';
+        'Please refresh the page to try again. If the problem persists, try a smaller PDF or check your connection.';
     }
     if (DEBUG_MODE && debugData) renderDebugPanel();
   }
 });
 
 // ============================================================
-// OCR one page via the per-page endpoint
+// OCR one page via the per-page endpoint (with retry on failure)
 // ============================================================
-async function ocrOnePage(pageNum) {
+async function ocrOnePage(pageNum, attempt) {
+  attempt = attempt || 0;
+  const MAX_ATTEMPTS = 3; // total attempts: 1 initial + 2 retries
   try {
     const resp = await fetch(`/api/process/${SESSION_ID}/page/${pageNum}`, { method: 'POST' });
     let json;
     try { json = await resp.json(); } catch (e) { json = { error: 'Invalid server response' }; }
 
     if (!resp.ok || json.error) {
-      // Store an error block so the user still sees something
-      const existing = ocrResults.find(r => r.page === pageNum);
-      if (!existing) {
-        ocrResults.push({ page: pageNum, blocks: [{ text: `[OCR failed: ${json.error || 'unknown error'}]`, confidence: 0, block_num: 0 }] });
+      if (attempt + 1 < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        return ocrOnePage(pageNum, attempt + 1);
+      }
+      // All retries exhausted — store a descriptive error block
+      const errMsg = json.error || `HTTP ${resp.status}`;
+      if (!ocrResults.find(r => r.page === pageNum)) {
+        ocrResults.push({ page: pageNum, blocks: [{ text: `[OCR failed for page ${pageNum}: ${errMsg}]`, confidence: 0, block_num: 0 }] });
       }
       return;
     }
@@ -278,9 +286,14 @@ async function ocrOnePage(pageNum) {
     ocrDonePages = ocrResults.length;
 
   } catch (err) {
-    // Network error – add placeholder so navigation still works
+    // Network / fetch error
+    if (attempt + 1 < MAX_ATTEMPTS) {
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      return ocrOnePage(pageNum, attempt + 1);
+    }
+    // Final failure — add a descriptive placeholder so navigation still works
     if (!ocrResults.find(r => r.page === pageNum)) {
-      ocrResults.push({ page: pageNum, blocks: [{ text: '[OCR error – network failure]', confidence: 0, block_num: 0 }] });
+      ocrResults.push({ page: pageNum, blocks: [{ text: `[OCR failed for page ${pageNum}: network error — ${err.message}. Try refreshing the page.]`, confidence: 0, block_num: 0 }] });
     }
   }
 }
@@ -394,22 +407,76 @@ document.getElementById('nextPage').addEventListener('click', () => {
   if (currentPage < totalPages) renderPage(currentPage + 1);
 });
 
+// Keyboard navigation: left/right arrows move between pages
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft'  && currentPage > 1)           renderPage(currentPage - 1);
+  if (e.key === 'ArrowRight' && currentPage < totalPages)  renderPage(currentPage + 1);
+});
+
+// Jump-to-page input: commit on Enter or blur
+function _commitPageJump() {
+  const input = document.getElementById('pageJumpInput');
+  if (!input) return;
+  const n = parseInt(input.value, 10);
+  if (!isNaN(n) && n >= 1 && n <= totalPages && n !== currentPage) {
+    renderPage(n);
+  } else {
+    input.value = currentPage; // revert invalid value
+  }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('pageJumpInput');
+  if (input) {
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); _commitPageJump(); } });
+    input.addEventListener('blur', _commitPageJump);
+  }
+});
+
 function renderPage(pageNum) {
   currentPage = pageNum;
   document.getElementById('pageIndicator').textContent = `${pageNum} / ${totalPages}`;
   document.getElementById('prevPage').disabled = pageNum === 1;
   document.getElementById('nextPage').disabled = pageNum === totalPages;
 
+  // Keep jump input in sync
+  const jumpInput = document.getElementById('pageJumpInput');
+  if (jumpInput) {
+    jumpInput.value = pageNum;
+    jumpInput.max = totalPages;
+  }
+
   // Update the "Add for Page N" button label
   const manualPageNum = document.getElementById('addManualPageNum');
   if (manualPageNum) manualPageNum.textContent = pageNum;
 
   // Load page image
+  const container = document.getElementById('pdfPageContainer');
   const img = document.getElementById('pdfPageImg');
+  img.onerror = () => {
+    const errDiv = document.createElement('div');
+    errDiv.className = 'page-load-error';
+    const errMsg = document.createElement('p');
+    errMsg.textContent = `⚠ Page ${pageNum} image could not be loaded.`;
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'btn-secondary';
+    retryBtn.textContent = '🔄 Retry';
+    retryBtn.addEventListener('click', () => retryPageImage(pageNum));
+    errDiv.appendChild(errMsg);
+    errDiv.appendChild(retryBtn);
+    container.innerHTML = '';
+    container.appendChild(errDiv);
+  };
   img.src = `/api/page/${SESSION_ID}/${pageNum}`;
   img.alt = `Page ${pageNum}`;
 
   renderOcrBlocksForPage(pageNum);
+}
+
+function retryPageImage(pageNum) {
+  const container = document.getElementById('pdfPageContainer');
+  container.innerHTML = '<img id="pdfPageImg" src="" alt="" class="pdf-page-img" />';
+  renderPage(pageNum);
 }
 
 function renderOcrBlocksForPage(pageNum) {
@@ -615,12 +682,13 @@ function hideOverlay() {
   document.getElementById('processingOverlay').style.display = 'none';
 }
 
-function showToast(msg, level) {
+function showToast(msg, level, durationMs) {
   const t = document.getElementById('toast');
   t.textContent    = msg;
   t.className      = `toast toast-${level || 'info'}`;
   t.style.display  = 'block';
-  setTimeout(() => { t.style.display = 'none'; }, 4000);
+  const delay = durationMs || (level === 'error' ? 8000 : 4000);
+  setTimeout(() => { t.style.display = 'none'; }, delay);
 }
 
 function escHtml(str) {

@@ -214,6 +214,40 @@ a { color: var(--primary); }
 .spinner.large { width: 40px; height: 40px; border-width: 4px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---- Debug / Privacy toggle ---- */
+.debug-toggle {
+  margin-top: 1.2rem;
+  padding: .85rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-weight: 600;
+  font-size: .9rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+.privacy-note {
+  margin-top: .55rem;
+  font-size: .8rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 /* ============================================================
    INFO SECTION (upload page)
    ============================================================ */

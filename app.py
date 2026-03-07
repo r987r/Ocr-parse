@@ -615,6 +615,7 @@ def process(session_id):
             fmt="png",
             output_file="page",
         )
+        _save_json(sdir / "pages_meta.json", {"num_pages": len(images), "complete": True})
         if DEBUG_MODE:
             elapsed = round(time.time() - step_start, 2)
             debug_info["steps"].append({
@@ -733,11 +734,16 @@ def process_init(session_id):
         return jsonify({"error": "Annotated PDF not found."}), 404
 
     pages_dir = sdir / "pages"
+    pages_meta_path = sdir / "pages_meta.json"
 
-    # Return cached page count when images already exist
-    if pages_dir.exists():
-        png_count = _count_png_pages(pages_dir)
-        if png_count > 0:
+    # Return cached page count only when the previous conversion completed in full.
+    # A successful conversion always writes pages_meta.json with complete=True.
+    # If that file is absent (or marks an incomplete run), delete any partial images
+    # and re-run the conversion so we never return a truncated page count.
+    if pages_dir.exists() and pages_meta_path.exists():
+        meta = _load_json(pages_meta_path, {})
+        if meta.get("complete"):
+            num_pages = meta["num_pages"]
             fully_cached = False
             cached_path = sdir / "ocr_results.json"
             if cached_path.exists():
@@ -745,10 +751,13 @@ def process_init(session_id):
                 fully_cached = bool(cached_results)
             return jsonify({
                 "success": True,
-                "num_pages": png_count,
+                "num_pages": num_pages,
                 "fully_cached": fully_cached,
             })
 
+    # Either first run, or a previous conversion was interrupted — clean up and redo.
+    if pages_dir.exists():
+        shutil.rmtree(pages_dir, ignore_errors=True)
     pages_dir.mkdir(exist_ok=True)
 
     debug_info: dict[str, Any] = {}
@@ -768,6 +777,9 @@ def process_init(session_id):
             output_file="page",
         )
         num_pages = len(images)
+
+        # Mark conversion as complete so retries know the full page count.
+        _save_json(pages_meta_path, {"num_pages": num_pages, "complete": True})
 
         if DEBUG_MODE:
             debug_info["steps"] = [{

@@ -387,6 +387,36 @@ a { color: var(--primary); }
 .panel-header h2 { font-size: .95rem; font-weight: 700; }
 .page-nav { display: flex; align-items: center; gap: .4rem; font-size: .85rem; }
 
+/* Jump-to-page number input in the page-nav bar */
+.page-jump-input {
+  width: 3.6rem;
+  padding: .15rem .35rem;
+  font-size: .82rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: center;
+  -moz-appearance: textfield;
+}
+.page-jump-input::-webkit-inner-spin-button,
+.page-jump-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.page-jump-input:focus { outline: none; border-color: var(--primary); }
+
+/* Error message shown when a page image fails to load */
+.page-load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .8rem;
+  padding: 2rem;
+  color: var(--danger);
+  font-size: .9rem;
+  font-weight: 600;
+  text-align: center;
+}
+
 .pdf-page-container {
   flex: 1;
   overflow: auto;

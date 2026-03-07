@@ -1539,6 +1539,53 @@ class TestPageByPageOCR(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.content_type, "image/png")
 
+    def test_init_writes_pages_meta_json(self):
+        """After /init succeeds, pages_meta.json is written with complete=True and correct page count."""
+        sid = self._upload(num_pages=2)
+        resp = self.client.post(f"/api/process/{sid}/init")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        meta_path = Path(_test_upload_dir) / sid / "pages_meta.json"
+        self.assertTrue(meta_path.exists(), "pages_meta.json should be created after /init")
+        meta = json.loads(meta_path.read_text())
+        self.assertTrue(meta.get("complete"), "pages_meta.json should have complete=True")
+        self.assertEqual(meta["num_pages"], data["num_pages"])
+
+    def test_init_retriggers_conversion_when_meta_missing(self):
+        """If pages exist but pages_meta.json is absent, /init re-converts the PDF."""
+        sid = self._upload(num_pages=2)
+        # First convert so pages directory is populated
+        self.client.post(f"/api/process/{sid}/init")
+
+        # Delete the meta file to simulate a partial/interrupted previous run
+        meta_path = Path(_test_upload_dir) / sid / "pages_meta.json"
+        meta_path.unlink()
+
+        # Calling /init again should re-convert and return the correct page count
+        resp = self.client.post(f"/api/process/{sid}/init")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"])
+        self.assertGreaterEqual(data["num_pages"], 2)
+        # Meta file should now be re-created
+        self.assertTrue(meta_path.exists(), "pages_meta.json should be recreated after re-conversion")
+
+    def test_init_retriggers_when_meta_marks_incomplete(self):
+        """If pages_meta.json has complete=False, /init re-converts and marks complete."""
+        sid = self._upload(num_pages=1)
+        # Write a meta file that marks the conversion as incomplete
+        meta_path = Path(_test_upload_dir) / sid / "pages_meta.json"
+        (Path(_test_upload_dir) / sid / "pages").mkdir(exist_ok=True)
+        meta_path.write_text(json.dumps({"num_pages": 0, "complete": False}))
+
+        resp = self.client.post(f"/api/process/{sid}/init")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"])
+        self.assertGreaterEqual(data["num_pages"], 1)
+        meta = json.loads(meta_path.read_text())
+        self.assertTrue(meta.get("complete"))
+
 
 class TestMobileAccessibility(unittest.TestCase):
     """Tests confirming mobile-accessibility markup in rendered HTML pages."""

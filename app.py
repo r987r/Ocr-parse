@@ -534,6 +534,24 @@ def _build_ocr_response(
     return resp
 
 
+def _find_page_image(pages_dir: Path, page_num: int) -> "Path | None":
+    """Return the PNG path for *page_num* in *pages_dir*, or ``None``."""
+    for pad in range(1, 5):
+        candidate = pages_dir / f"page{str(page_num).zfill(pad)}.png"
+        if candidate.exists():
+            return candidate
+    # Fallback: sort all PNGs and return the N-th one (handles any naming convention)
+    pngs = sorted(pages_dir.glob("*.png"))
+    if 1 <= page_num <= len(pngs):
+        return pngs[page_num - 1]
+    return None
+
+
+def _count_png_pages(pages_dir: Path) -> int:
+    """Return the number of PNG images in *pages_dir*."""
+    return len(list(pages_dir.glob("*.png")))
+
+
 @app.route("/api/process/<session_id>", methods=["POST"])
 def process(session_id):
     """Convert PDF to images and run OCR on each page.
@@ -687,6 +705,207 @@ def process(session_id):
         return jsonify({"error": f"OCR processing failed: {exc}"}), 500
 
 
+@app.route("/api/process/<session_id>/init", methods=["POST"])
+def process_init(session_id):
+    """Convert PDF to page images (no OCR) and return the page count.
+
+    This is the first step in the page-by-page OCR flow.  The images are
+    written to ``<session_dir>/pages/`` and reused on subsequent calls so the
+    conversion never happens twice for the same session.
+    """
+    sdir = UPLOAD_BASE / session_id
+    if not sdir.exists():
+        return jsonify({"error": "Session not found."}), 404
+
+    pdf_path = sdir / "annotated.pdf"
+    if not pdf_path.exists():
+        return jsonify({"error": "Annotated PDF not found."}), 404
+
+    pages_dir = sdir / "pages"
+
+    # Return cached page count when images already exist
+    if pages_dir.exists():
+        png_count = _count_png_pages(pages_dir)
+        if png_count > 0:
+            fully_cached = False
+            cached_path = sdir / "ocr_results.json"
+            if cached_path.exists():
+                cached_results = _load_json(cached_path, [])
+                fully_cached = bool(cached_results)
+            return jsonify({
+                "success": True,
+                "num_pages": png_count,
+                "fully_cached": fully_cached,
+            })
+
+    pages_dir.mkdir(exist_ok=True)
+
+    debug_info: dict[str, Any] = {}
+    if DEBUG_MODE:
+        debug_info = _get_system_debug_info()
+        debug_info["session_id"] = session_id
+
+    step_start = time.time()
+    try:
+        import pdf2image
+
+        images = pdf2image.convert_from_path(
+            str(pdf_path),
+            dpi=150,
+            output_folder=str(pages_dir),
+            fmt="png",
+            output_file="page",
+        )
+        num_pages = len(images)
+
+        if DEBUG_MODE:
+            debug_info["steps"] = [{
+                "step": "pdf_to_images",
+                "status": "ok",
+                "elapsed_sec": round(time.time() - step_start, 2),
+                "num_pages": num_pages,
+                "dpi": 150,
+            }]
+
+        resp: dict[str, Any] = {"success": True, "num_pages": num_pages}
+        if DEBUG_MODE:
+            resp["debug"] = debug_info
+        return jsonify(resp)
+
+    except Exception as exc:
+        if DEBUG_MODE:
+            debug_info["steps"] = [{
+                "step": "pdf_to_images",
+                "status": "error",
+                "elapsed_sec": round(time.time() - step_start, 2),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }]
+            return jsonify({"error": f"PDF conversion failed: {exc}", "debug": debug_info}), 500
+        return jsonify({"error": f"PDF conversion failed: {exc}"}), 500
+
+
+@app.route("/api/process/<session_id>/page/<int:page_num>", methods=["POST"])
+def process_page(session_id, page_num):
+    """Run OCR on a single page and return the extracted text blocks.
+
+    Requires that ``/api/process/<session_id>/init`` has already been called so
+    page images exist on disk.  Results are cached per-page; once every page has
+    been processed the combined ``ocr_results.json`` file is written so the
+    legacy ``/api/process/<session_id>`` endpoint can still serve cached results.
+    """
+    sdir = UPLOAD_BASE / session_id
+    if not sdir.exists():
+        return jsonify({"error": "Session not found."}), 404
+
+    pages_dir = sdir / "pages"
+    if not pages_dir.exists() or _count_png_pages(pages_dir) == 0:
+        return jsonify({"error": "Pages not yet converted. Call /init first."}), 400
+
+    num_pages = _count_png_pages(pages_dir)
+
+    if page_num < 1 or page_num > num_pages:
+        return jsonify({"error": f"Page {page_num} out of range (1–{num_pages})."}), 400
+
+    # Per-page cache
+    per_page_cache = sdir / f"ocr_page_{page_num}.json"
+    if per_page_cache.exists():
+        cached_data = _load_json(per_page_cache, None)
+        if cached_data is not None:
+            cached_data["cached"] = True
+            cached_data["num_pages"] = num_pages
+            return jsonify(cached_data)
+
+    # Full-result cache (written when all pages are done)
+    full_cache = sdir / "ocr_results.json"
+    if full_cache.exists():
+        full_results = _load_json(full_cache, [])
+        page_data = next((r for r in full_results if r["page"] == page_num), None)
+        if page_data:
+            return jsonify({
+                "success": True,
+                "page": page_num,
+                "num_pages": num_pages,
+                "blocks": page_data["blocks"],
+                "cached": True,
+            })
+
+    # Locate the page image on disk
+    img_path = _find_page_image(pages_dir, page_num)
+    if not img_path:
+        return jsonify({"error": f"Image for page {page_num} not found."}), 404
+
+    try:
+        from PIL import Image as _PILImage
+        img = _PILImage.open(str(img_path))
+    except Exception as exc:
+        return jsonify({"error": f"Failed to load page image: {exc}"}), 500
+
+    config = _load_json(sdir / "config.json", {})
+
+    page_start = time.time()
+    try:
+        from ocr_engine import OCREngine
+
+        ocr = OCREngine(
+            engine=config.get("ocr_engine", "tesseract"),
+            api_key=config.get("api_key", "") or None,
+        )
+        blocks = ocr.extract_text_blocks(img)
+    except Exception as exc:
+        blocks = [{"text": f"[OCR error: {exc}]", "confidence": 0, "block_num": 0}]
+
+    result: dict[str, Any] = {
+        "success": True,
+        "page": page_num,
+        "num_pages": num_pages,
+        "blocks": blocks,
+    }
+    if DEBUG_MODE:
+        elapsed = round(time.time() - page_start, 2)
+        total_text = " ".join(b["text"] for b in blocks)
+        result["debug"] = {
+            "ocr_elapsed_sec": elapsed,
+            "num_blocks": len(blocks),
+            "total_chars": len(total_text),
+        }
+
+    # Save per-page cache
+    _save_json(per_page_cache, result)
+
+    # When every page is done, write the combined ocr_results.json
+    combined = []
+    all_done = True
+    for p in range(1, num_pages + 1):
+        p_cache = sdir / f"ocr_page_{p}.json"
+        if p_cache.exists():
+            p_data = _load_json(p_cache, None)
+            if p_data:
+                combined.append({"page": p, "blocks": p_data.get("blocks", [])})
+                continue
+        all_done = False
+        break
+
+    if all_done and len(combined) == num_pages:
+        _save_json(full_cache, combined)
+
+        # Send notification email once (after all pages processed)
+        email = config.get("email", "")
+        if email and not config.get("email_sent"):
+            config["email_sent"] = True
+            _save_json(sdir / "config.json", config)
+            _base_url = config.get("base_url", "")
+            _token = config.get("access_token", "")
+            t = threading.Thread(
+                target=_send_notification_email,
+                args=(email, _base_url, _token),
+                daemon=True,
+            )
+            t.start()
+
+    return jsonify(result)
+
+
 @app.route("/api/page/<session_id>/<int:page_num>")
 def get_page_image(session_id, page_num):
     """Serve a PNG image of a PDF page (1-indexed)."""
@@ -695,17 +914,9 @@ def get_page_image(session_id, page_num):
         abort(404)
     pages_dir = sdir / "pages"
 
-    # pdf2image may produce page1.png, page01.png, page001.png, etc.
-    for pad in range(1, 5):
-        fmt = f"page{str(page_num).zfill(pad)}.png"
-        candidate = pages_dir / fmt
-        if candidate.exists():
-            return send_file(str(candidate), mimetype="image/png")
-
-    # Fallback: glob
-    matches = sorted(pages_dir.glob(f"*{page_num}*.png"))
-    if matches:
-        return send_file(str(matches[0]), mimetype="image/png")
+    img_path = _find_page_image(pages_dir, page_num)
+    if img_path:
+        return send_file(str(img_path), mimetype="image/png")
 
     abort(404)
 

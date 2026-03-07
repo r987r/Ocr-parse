@@ -1403,5 +1403,142 @@ class TestAnnotationsRoundTrip(unittest.TestCase):
         self.assertIn("blocks", data[0])
 
 
+class TestPageByPageOCR(unittest.TestCase):
+    """Tests for the page-by-page OCR endpoints (/init and /page/<n>)."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def tearDown(self):
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    def _upload(self, num_pages=1):
+        pdf = FPDF()
+        for i in range(1, num_pages + 1):
+            pdf.add_page()
+            pdf.set_font("Helvetica", size=14)
+            pdf.cell(0, 10, f"Page {i} TestContent INVOICE", new_x="LMARGIN", new_y="NEXT")
+        buf = io.BytesIO()
+        pdf.output(buf)
+        buf.seek(0)
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        return json.loads(resp.data)["session_id"]
+
+    def test_init_returns_page_count(self):
+        """POST /api/process/<sid>/init returns success and page count."""
+        sid = self._upload(num_pages=1)
+        resp = self.client.post(f"/api/process/{sid}/init")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"])
+        self.assertGreaterEqual(data["num_pages"], 1)
+
+    def test_init_converts_images(self):
+        """After /init, page image files exist on disk."""
+        sid = self._upload(num_pages=1)
+        self.client.post(f"/api/process/{sid}/init")
+        pages_dir = Path(_test_upload_dir) / sid / "pages"
+        self.assertTrue(pages_dir.exists())
+        pngs = list(pages_dir.glob("*.png"))
+        self.assertGreater(len(pngs), 0)
+
+    def test_init_is_idempotent(self):
+        """Calling /init twice returns the same page count both times."""
+        sid = self._upload(num_pages=1)
+        resp1 = self.client.post(f"/api/process/{sid}/init")
+        resp2 = self.client.post(f"/api/process/{sid}/init")
+        self.assertEqual(resp1.status_code, 200)
+        self.assertEqual(resp2.status_code, 200)
+        data1 = json.loads(resp1.data)
+        data2 = json.loads(resp2.data)
+        self.assertEqual(data1["num_pages"], data2["num_pages"])
+
+    def test_init_unknown_session_returns_404(self):
+        """POST /api/process/unknown/init returns 404."""
+        resp = self.client.post("/api/process/nonexistent-session-id/init")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("error", json.loads(resp.data))
+
+    def test_process_page_extracts_text(self):
+        """POST /api/process/<sid>/page/1 extracts text blocks."""
+        sid = self._upload(num_pages=1)
+        self.client.post(f"/api/process/{sid}/init")
+
+        resp = self.client.post(f"/api/process/{sid}/page/1")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["success"])
+        self.assertEqual(data["page"], 1)
+        self.assertGreaterEqual(data["num_pages"], 1)
+        self.assertIsInstance(data["blocks"], list)
+
+    def test_process_page_without_init_returns_400(self):
+        """POST /api/process/<sid>/page/1 before /init returns 400."""
+        sid = self._upload(num_pages=1)
+        resp = self.client.post(f"/api/process/{sid}/page/1")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("error", json.loads(resp.data))
+
+    def test_process_page_out_of_range_returns_400(self):
+        """POST /api/process/<sid>/page/99 for a 1-page PDF returns 400."""
+        sid = self._upload(num_pages=1)
+        self.client.post(f"/api/process/{sid}/init")
+        resp = self.client.post(f"/api/process/{sid}/page/99")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("error", json.loads(resp.data))
+
+    def test_process_page_unknown_session_returns_404(self):
+        """POST /api/process/unknown/page/1 returns 404."""
+        resp = self.client.post("/api/process/nonexistent-session-id/page/1")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("error", json.loads(resp.data))
+
+    def test_process_page_cached_on_second_call(self):
+        """Second call to /page/1 returns cached=True."""
+        sid = self._upload(num_pages=1)
+        self.client.post(f"/api/process/{sid}/init")
+        self.client.post(f"/api/process/{sid}/page/1")  # first call
+        resp = self.client.post(f"/api/process/{sid}/page/1")  # second call
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data.get("cached"), "Second page call should be cached")
+
+    def test_all_pages_done_writes_ocr_results(self):
+        """After processing all pages via /page/<n>, ocr_results.json is created."""
+        sid = self._upload(num_pages=2)
+        self.client.post(f"/api/process/{sid}/init")
+        self.client.post(f"/api/process/{sid}/page/1")
+        self.client.post(f"/api/process/{sid}/page/2")
+
+        ocr_path = Path(_test_upload_dir) / sid / "ocr_results.json"
+        self.assertTrue(ocr_path.exists(), "ocr_results.json should be written when all pages done")
+        results = json.loads(ocr_path.read_text())
+        self.assertEqual(len(results), 2)
+
+    def test_init_fully_cached_after_legacy_process(self):
+        """After running the legacy /api/process endpoint, /init reports fully_cached."""
+        sid = self._upload(num_pages=1)
+        self.client.post(f"/api/process/{sid}")  # legacy full process
+        resp = self.client.post(f"/api/process/{sid}/init")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data.get("fully_cached"), "Should report fully_cached after legacy process")
+
+    def test_page_image_served_after_init(self):
+        """After /init, the page image endpoint serves PNG for page 1."""
+        sid = self._upload(num_pages=1)
+        self.client.post(f"/api/process/{sid}/init")
+        resp = self.client.get(f"/api/page/{sid}/1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content_type, "image/png")
+
+
 if __name__ == "__main__":
     unittest.main()

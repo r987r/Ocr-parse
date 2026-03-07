@@ -308,7 +308,7 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
     // Clean up server-side session data (no document retention)
     try {
       await fetch(`/api/cleanup/${SESSION_ID}`, { method: 'POST' });
-    } catch (_) { /* ignore cleanup errors */ }
+    } catch (cleanupErr) { console.warn('Session cleanup failed:', cleanupErr); }
 
   } catch (err) {
     showToast('⚠ ' + err.message, 'error');

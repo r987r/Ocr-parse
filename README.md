@@ -30,7 +30,7 @@ The fastest way to get running. No local install needed.
 # Build
 docker build -t ocr-parse .
 
-# Run
+# Run (maps local port 5000 → container port 10000)
 docker run -p 5000:10000 -e SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))") ocr-parse
 ```
 

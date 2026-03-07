@@ -441,8 +441,8 @@ function renderDebugPanel() {
   const sessFields = [
     ['Session ID', debugData.session_id || SESSION_ID],
     ['OCR Engine', debugData.ocr_engine || OCR_ENGINE],
-    ['PDF Size', debugData.pdf_file_size_mb != null ? debugData.pdf_file_size_mb + ' MB' : 'unknown'],
-    ['Total Time', debugData.total_elapsed_sec != null ? debugData.total_elapsed_sec + 's' : 'pending'],
+    ['PDF Size', debugData.pdf_file_size_mb != null ? `${debugData.pdf_file_size_mb} MB` : 'unknown'],
+    ['Total Time', debugData.total_elapsed_sec != null ? `${debugData.total_elapsed_sec}s` : 'pending'],
     ['Timestamp', debugData.timestamp || ''],
   ];
   sessFields.forEach(([k, v]) => {

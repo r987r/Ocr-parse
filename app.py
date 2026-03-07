@@ -369,6 +369,7 @@ def process(session_id):
 
     # Collect debug info when debug mode is active
     debug_info: dict[str, Any] = {}
+    total_start = time.time()
     if DEBUG_MODE:
         debug_info = _get_system_debug_info()
         debug_info["session_id"] = session_id
@@ -465,7 +466,7 @@ def process(session_id):
             "results": ocr_results,
         }
         if DEBUG_MODE:
-            total_elapsed = round(time.time() - step_start, 2)
+            total_elapsed = round(time.time() - total_start, 2)
             debug_info["total_elapsed_sec"] = total_elapsed
             resp["debug"] = debug_info
 

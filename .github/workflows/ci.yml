@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Tests & Security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y tesseract-ocr poppler-utils
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: python -m unittest test_app -v
+
+      # ── Dependency vulnerability scan ─────────────────────────────────────
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit dependencies for known CVEs
+        run: pip-audit -r requirements.txt
+
+      # ── Static Application Security Testing (SAST) ─────────────────────
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit (medium/high severity only)
+        # -ll = only report medium and above; low-severity findings like
+        # subprocess-with-fixed-args and bind-to-0.0.0.0 in dev __main__
+        # are informational false-positives for this project.
+        run: bandit -r app.py ocr_engine.py word_export.py -ll

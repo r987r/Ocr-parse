@@ -31,6 +31,16 @@
         <input type="file" id="annotated_pdf" name="annotated_pdf" accept=".pdf" required />
       </div>
 
+      <!-- Optional email for completion notification -->
+      <div class="form-group">
+        <label for="email">
+          Email Address
+          <small>(optional – we'll email you a link when processing is complete)</small>
+        </label>
+        <input type="email" id="email" name="email" placeholder="you@example.com"
+               autocomplete="email" />
+      </div>
+
       <!-- Original document (optional) -->
       <div class="form-group">
         <label for="original_doc">
@@ -82,7 +92,8 @@
     </ol>
     <p style="margin-top:1rem;font-size:.85rem;color:var(--muted);">
       🔒 <strong>Privacy:</strong> Uses free Tesseract OCR – all processing happens on the server.
-      No documents are retained after your session ends.
+      Documents are stored for up to <strong>24 hours</strong>, then automatically deleted.
+      You can also delete your document at any time from the review page.
     </p>
   </div>
 
@@ -90,7 +101,7 @@
 
 <footer class="site-footer">
   <div class="container">
-    OCR Parse &mdash; Free Tesseract OCR &bull; No document retention
+    OCR Parse &mdash; Free Tesseract OCR &bull; Documents stored for up to 24 hours
   </div>
 </footer>
 
@@ -108,6 +119,14 @@
     const annFile = document.getElementById('annotated_pdf').files[0];
     if (!annFile) {
       showError('Please select a PDF file.');
+      return;
+    }
+
+    # Optional email for completion notification
+    # NOTE: validation regex here matches _EMAIL_RE in app.py – keep in sync
+    const emailVal = document.getElementById('email').value.trim();
+    if (emailVal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal)) {
+      showError('Please enter a valid email address.');
       return;
     }
 
@@ -154,6 +173,10 @@
       }
 
       document.getElementById('progressMsg').textContent = 'Redirecting to review page…';
+      if (emailVal) {
+        document.getElementById('progressMsg').textContent =
+          'Redirecting… We\'ll email you at ' + emailVal + ' when processing is complete.';
+      }
       window.location.href = json.redirect;
 
     } catch (err) {

@@ -19,6 +19,9 @@
         🔧 Debug
       </button>
       {% endif %}
+      <button id="deleteBtn" class="btn-danger btn-delete-doc">
+        🗑 Delete Document
+      </button>
       <button id="exportBtn" class="btn-primary btn-export">
         💾 Make File (Export .docx)
       </button>
@@ -355,12 +358,7 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
     a.click();
     URL.revokeObjectURL(url);
 
-    showToast('✅ Document exported successfully!', 'success');
-
-    // Clean up server-side session data (no document retention)
-    try {
-      await fetch(`/api/cleanup/${SESSION_ID}`, { method: 'POST' });
-    } catch (cleanupErr) { console.warn('Session cleanup failed:', cleanupErr); }
+    showToast('✅ Document exported! You can close this tab or delete the document when done.', 'success');
 
   } catch (err) {
     showToast('⚠ ' + err.message, 'error');
@@ -369,9 +367,15 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   }
 });
 
-// Clean up session when user leaves the page
-window.addEventListener('beforeunload', () => {
-  navigator.sendBeacon(`/api/cleanup/${SESSION_ID}`);
+// ============================================================
+// Delete document
+// ============================================================
+document.getElementById('deleteBtn').addEventListener('click', async () => {
+  if (!confirm('Delete this document from the server? This cannot be undone.')) return;
+  try {
+    await fetch(`/api/cleanup/${SESSION_ID}`, { method: 'POST' });
+  } catch (_) { /* best-effort */ }
+  window.location.href = '/';
 });
 
 // ============================================================

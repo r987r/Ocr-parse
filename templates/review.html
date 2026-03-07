@@ -109,7 +109,18 @@ window.addEventListener('DOMContentLoaded', async () => {
   showOverlay('Processing PDF with OCR…');
   try {
     const resp = await fetch(`/api/process/${SESSION_ID}`, { method: 'POST' });
-    const json = await resp.json();
+
+    // Guard against non-JSON responses (e.g. HTML 500/504 from gunicorn)
+    let json;
+    try {
+      json = await resp.json();
+    } catch (_parseErr) {
+      throw new Error(
+        `Processing failed (HTTP ${resp.status}). ` +
+        'The server returned an unexpected response. Please try again.'
+      );
+    }
+
     if (!resp.ok || json.error) throw new Error(json.error || 'Processing failed.');
 
     ocrResults = json.results || [];
@@ -290,8 +301,13 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
   try {
     const resp = await fetch(`/api/export/${SESSION_ID}`, { method: 'POST' });
     if (!resp.ok) {
-      const json = await resp.json();
-      throw new Error(json.error || 'Export failed.');
+      let errJson;
+      try {
+        errJson = await resp.json();
+      } catch (_) {
+        throw new Error(`Export failed (HTTP ${resp.status}). Please try again.`);
+      }
+      throw new Error(errJson.error || 'Export failed.');
     }
 
     // Trigger file download

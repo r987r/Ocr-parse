@@ -239,6 +239,36 @@ class TestOCRParse(unittest.TestCase):
         finally:
             app.config["MAX_CONTENT_LENGTH"] = original_limit
 
+    def test_api_404_returns_json(self):
+        """API 404 responses return JSON, not HTML."""
+        resp = self.client.post("/api/process/nonexistent-session-id")
+        self.assertEqual(resp.status_code, 404)
+        data = json.loads(resp.data)
+        self.assertIn("error", data)
+
+    def test_api_500_returns_json(self):
+        """A forced 500 on an API route returns JSON, not HTML."""
+        from unittest.mock import patch
+
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        data = json.loads(resp.data)
+        session_id = data["session_id"]
+
+        # Patch _save_json to raise inside the process route to trigger the 500 handler
+        with patch("app._save_json", side_effect=RuntimeError("forced error")):
+            resp = self.client.post(f"/api/process/{session_id}")
+
+        self.assertEqual(resp.status_code, 500)
+        data = json.loads(resp.data)
+        self.assertIn("error", data)
+        # Must be parseable as JSON – not an HTML page
+        self.assertEqual(resp.content_type, "application/json")
+
     def test_debug_log_endpoints(self):
         """Debug log is empty by default; upload failure with debug_mode stores an entry."""
         import app as app_module

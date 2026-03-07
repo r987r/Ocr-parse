@@ -178,6 +178,38 @@ def request_entity_too_large(error):
     return jsonify({"error": msg, "error_type": "file_too_large"}), 413
 
 
+@app.errorhandler(404)
+def not_found_error(error):
+    """Return JSON for API 404s; simple HTML for UI routes."""
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Resource not found.", "error_type": "not_found"}), 404
+    return (
+        "<h1>404 – Not Found</h1><p><a href='/'>Go back to the upload page</a></p>",
+        404,
+    )
+
+
+@app.errorhandler(500)
+def internal_server_error_handler(error):
+    """Return JSON for API 500s so the frontend never sees an HTML error page."""
+    if request.path.startswith("/api/"):
+        logging.exception("Unhandled server error on %s", request.path)
+        return (
+            jsonify(
+                {
+                    "error": "An unexpected server error occurred. Please try again.",
+                    "error_type": "server_error",
+                }
+            ),
+            500,
+        )
+    return (
+        "<h1>500 – Internal Server Error</h1>"
+        "<p>Something went wrong. <a href='/'>Go back to the upload page</a></p>",
+        500,
+    )
+
+
 @app.route("/health")
 def health():
     """Health check endpoint for deployment platforms."""
@@ -279,25 +311,30 @@ def process(session_id):
         return jsonify({"error": f"PDF conversion failed: {exc}"}), 500
 
     # -- OCR each page --
-    from ocr_engine import OCREngine
+    try:
+        from ocr_engine import OCREngine
 
-    ocr = OCREngine(
-        engine=config.get("ocr_engine", "tesseract"),
-        api_key=config.get("api_key", "") or None,
-    )
+        ocr = OCREngine(
+            engine=config.get("ocr_engine", "tesseract"),
+            api_key=config.get("api_key", "") or None,
+        )
 
-    ocr_results = []
-    for idx, img in enumerate(images):
-        try:
-            blocks = ocr.extract_text_blocks(img)
-        except Exception as exc:
-            blocks = [{"text": f"[OCR error: {exc}]", "confidence": 0, "block_num": 0}]
+        ocr_results = []
+        for idx, img in enumerate(images):
+            try:
+                blocks = ocr.extract_text_blocks(img)
+            except Exception as exc:
+                blocks = [{"text": f"[OCR error: {exc}]", "confidence": 0, "block_num": 0}]
 
-        ocr_results.append({"page": idx + 1, "blocks": blocks})
+            ocr_results.append({"page": idx + 1, "blocks": blocks})
 
-    _save_json(sdir / "ocr_results.json", ocr_results)
+        _save_json(sdir / "ocr_results.json", ocr_results)
 
-    return jsonify({"success": True, "num_pages": len(images), "results": ocr_results})
+        return jsonify({"success": True, "num_pages": len(images), "results": ocr_results})
+
+    except Exception as exc:
+        logging.exception("Unexpected OCR processing error for session %s", session_id)
+        return jsonify({"error": f"OCR processing failed: {exc}"}), 500
 
 
 @app.route("/api/page/<session_id>/<int:page_num>")

@@ -45,7 +45,7 @@ def create_word_document(annotations, original_docx_path=None, output_path="outp
         original_docx_path : path to original .docx (or None)
         output_path        : where to write the output file
     """
-    date_str = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # ---- Step 1: build base document ----------------------------------------
     base_path = output_path + ".base.docx"

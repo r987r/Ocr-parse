@@ -95,7 +95,7 @@ def _register_token(token: str, session_id: str) -> None:
         _save_json(_tokens_file(), registry)
 
 
-def _get_session_for_token(token: str) -> "str | None":
+def _get_session_for_token(token: str) -> str | None:
     """Return the session_id for *token*, or ``None`` if not found."""
     with _tokens_lock:
         registry = _load_json(_tokens_file(), {})
@@ -510,6 +510,30 @@ def token_redirect(access_token):
     return redirect(url_for("review", session_id=session_id))
 
 
+def _build_ocr_response(
+    results: list,
+    session_id: str,
+    debug_info: "dict[str, Any] | None" = None,
+    cached: bool = False,
+) -> dict[str, Any]:
+    """Build a standardised JSON-serialisable dict for a process response."""
+    resp: dict[str, Any] = {
+        "success": True,
+        "num_pages": len(results),
+        "results": results,
+    }
+    if cached:
+        resp["cached"] = True
+    if DEBUG_MODE:
+        if debug_info is None:
+            debug_info = _get_system_debug_info()
+            debug_info["session_id"] = session_id
+        if cached:
+            debug_info["cached"] = True
+        resp["debug"] = debug_info
+    return resp
+
+
 @app.route("/api/process/<session_id>", methods=["POST"])
 def process(session_id):
     """Convert PDF to images and run OCR on each page.
@@ -534,18 +558,7 @@ def process(session_id):
     if cached_path.exists() and pages_dir.exists() and any(pages_dir.glob("*.png")):
         cached_results = _load_json(cached_path, [])
         if cached_results:
-            resp: dict[str, Any] = {
-                "success": True,
-                "num_pages": len(cached_results),
-                "results": cached_results,
-                "cached": True,
-            }
-            if DEBUG_MODE:
-                cache_debug = _get_system_debug_info()
-                cache_debug["session_id"] = session_id
-                cache_debug["cached"] = True
-                resp["debug"] = cache_debug
-            return jsonify(resp)
+            return jsonify(_build_ocr_response(cached_results, session_id, cached=True))
 
     # Collect debug info when debug mode is active
     debug_info: dict[str, Any] = {}
@@ -654,17 +667,9 @@ def process(session_id):
             t.start()
 
         # Build response
-        resp: dict[str, Any] = {
-            "success": True,
-            "num_pages": len(images),
-            "results": ocr_results,
-        }
         if DEBUG_MODE:
-            total_elapsed = round(time.time() - total_start, 2)
-            debug_info["total_elapsed_sec"] = total_elapsed
-            resp["debug"] = debug_info
-
-        return jsonify(resp)
+            debug_info["total_elapsed_sec"] = round(time.time() - total_start, 2)
+        return jsonify(_build_ocr_response(ocr_results, session_id, debug_info=debug_info))
 
     except Exception as exc:
         logging.exception("Unexpected OCR processing error for session %s", session_id)

@@ -8,10 +8,12 @@
 </head>
 <body class="review-body">
 
+<a href="#annPanel" class="skip-link">Skip to annotations</a>
+
 <!-- ===== Header ===== -->
-<header class="review-header">
+<header class="review-header" role="banner">
   <div class="review-header-inner">
-    <a href="/" class="btn-ghost">← New Upload</a>
+    <a href="/" class="btn-ghost" aria-label="Go to upload page">← New Upload</a>
     <h1>📄 Review Annotations</h1>
     <div class="header-actions">
       {% if debug_mode %}
@@ -41,52 +43,72 @@
 <!-- ===== Main layout ===== -->
 <div class="review-layout" id="reviewLayout" style="display:none;">
 
-  <!-- OCR progress banner (hidden once all pages are done) -->
-  <div id="ocrProgressBanner" class="ocr-progress-banner" style="display:none;">
-    <div class="spinner"></div>
-    <span id="ocrProgressText">Extracting text…</span>
+  <!-- PDF annotation import banner (shown when embedded annotations are found) -->
+  <div id="pdfAnnotBanner" class="pdf-annot-banner" role="status" aria-live="polite">
+    <span>📌 <strong id="pdfAnnotCount">0</strong> embedded PDF annotation(s) found. Import them as review comments?</span>
+    <button class="btn-import-annots" id="importPdfAnnotsBtn" onclick="importPdfAnnotations()">Import</button>
+    <button class="btn-dismiss-annots" id="dismissPdfAnnotsBtn" onclick="dismissPdfAnnotBanner()" aria-label="Dismiss">✕</button>
   </div>
+
+  <!-- OCR progress banner (hidden once all pages are done) -->
+  <div id="ocrProgressBanner" class="ocr-progress-banner" style="display:none;" role="status" aria-live="polite">
+    <div class="spinner"></div>
+    <div style="flex:1;min-width:0;">
+      <span id="ocrProgressText">Extracting text…</span>
+      <span id="ocrProgressStep" class="ocr-progress-step"></span>
+      <div class="ocr-progress-bar-wrap" style="margin-top:.3rem;">
+        <div id="ocrProgressBar" class="ocr-progress-bar-fill" style="width:0%"></div>
+      </div>
+    </div>
+    <span id="ocrProgressPct" style="font-weight:700;font-size:.85rem;color:var(--primary);flex-shrink:0;">0%</span>
+  </div>
+
+  <!-- Mobile tab navigation (hidden on desktop via CSS) -->
+  <nav class="mobile-tabs" id="mobileTabs" aria-label="View switcher">
+    <button class="mobile-tab active" id="tabPdfBtn" onclick="switchMobileTab('pdf')" aria-selected="true" role="tab">📄 PDF &amp; Text</button>
+    <button class="mobile-tab" id="tabAnnBtn" onclick="switchMobileTab('ann')" aria-selected="false" role="tab">✏️ Annotations <span id="annCountTab" class="badge-count" style="font-size:.7rem;">0</span></button>
+  </nav>
 
   <!-- LEFT: PDF Pages viewer -->
   <div class="review-panels">
-  <section class="pdf-panel" id="pdfPanel">
+  <section class="pdf-panel tab-active" id="pdfPanel" role="region" aria-label="PDF viewer">
     <div class="panel-header">
       <h2>PDF Pages</h2>
       <div class="page-nav">
-        <button class="btn-ghost" id="prevPage">&#8249;</button>
-        <span id="pageIndicator">1 / 1</span>
-        <button class="btn-ghost" id="nextPage">&#8250;</button>
+        <button class="btn-ghost" id="prevPage" aria-label="Previous page">&#8249;</button>
+        <span id="pageIndicator" aria-live="polite">1 / 1</span>
+        <button class="btn-ghost" id="nextPage" aria-label="Next page">&#8250;</button>
       </div>
     </div>
     <div class="pdf-page-container" id="pdfPageContainer">
-      <img id="pdfPageImg" src="" alt="PDF page" class="pdf-page-img" />
+      <img id="pdfPageImg" src="" alt="PDF page 1" class="pdf-page-img" />
     </div>
 
     <!-- OCR blocks for current page -->
     <div class="ocr-blocks-section">
       <h3>Extracted Text Blocks <small>(click ➕ to add as annotation)</small></h3>
-      <div id="ocrBlocksList" class="ocr-blocks-list">
+      <div id="ocrBlocksList" class="ocr-blocks-list" aria-label="OCR text blocks">
         <p class="muted">Loading…</p>
       </div>
     </div>
   </section>
 
   <!-- RIGHT: Annotation editor -->
-  <section class="ann-panel" id="annPanel">
+  <section class="ann-panel tab-hidden" id="annPanel" role="region" aria-label="Annotation editor">
     <div class="panel-header">
-      <h2>Annotations <span id="annCount" class="badge-count">0</span></h2>
-      <button class="btn-secondary" id="addManualBtn">+ Add Manually</button>
+      <h2>Annotations <span id="annCount" class="badge-count" aria-label="annotation count">0</span></h2>
+      <button class="btn-secondary" id="addManualBtn" title="Add an annotation for the current page">+ Add for Page <span id="addManualPageNum">1</span></button>
     </div>
 
-    <div id="annList" class="ann-list">
+    <div id="annList" class="ann-list" aria-label="Annotations list">
       <p class="muted empty-msg">No annotations yet.<br />Click ➕ on a text block to add one.</p>
     </div>
 
     <!-- Legend -->
-    <div class="ann-legend">
-      <span class="legend-item"><span class="type-pill comment">comment</span> Word comment balloon</span>
-      <span class="legend-item"><span class="type-pill insert">insert</span> Tracked insertion</span>
-      <span class="legend-item"><span class="type-pill delete">delete</span> Tracked deletion</span>
+    <div class="ann-legend" aria-label="Annotation type legend">
+      <span class="legend-item"><span class="type-pill comment">comment</span> adds a Word comment balloon at that location</span>
+      <span class="legend-item"><span class="type-pill insert">insert</span> tracked insertion of new text</span>
+      <span class="legend-item"><span class="type-pill delete">delete</span> tracked deletion of existing text</span>
     </div>
   </section>
   </div><!-- .review-panels -->
@@ -135,6 +157,14 @@ let currentPage  = 1;
 let totalPages   = 1;
 let debugData    = null;   // debug info from /api/process response
 let ocrDonePages = 0;      // how many pages have been OCR-processed so far
+let pdfAnnotations = [];   // embedded PDF annotations pending import
+
+// Annotation type explanations shown below each annotation's type selector
+const ANN_TYPE_HELP = {
+  comment: 'adds a Word comment balloon at this location',
+  insert:  'inserts new text (tracked change)',
+  delete:  'marks existing text for deletion (tracked change)',
+};
 
 // ============================================================
 // Boot: init (PDF → images), then OCR page by page
@@ -143,6 +173,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   showOverlay('Preparing pages…');
   try {
     // Step 1: convert PDF to page images, get page count
+    showOverlay('Converting PDF to page images…');
     const initResp = await fetch(`/api/process/${SESSION_ID}/init`, { method: 'POST' });
     let initJson;
     try {
@@ -159,6 +190,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     totalPages = initJson.num_pages || 1;
+    showOverlay(`PDF ready — ${totalPages} page${totalPages !== 1 ? 's' : ''}. Loading annotations…`);
 
     // Load saved annotations
     const annResp  = await fetch(`/api/annotations/${SESSION_ID}`);
@@ -171,20 +203,25 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderPage(1);
     renderAnnotations();
 
+    // Step 1b: check for embedded PDF annotations (non-blocking)
+    loadPdfAnnotations();
+
     // Step 2: if full OCR cache already exists, load it and we're done
     if (initJson.fully_cached) {
+      showOcrProgress(totalPages, totalPages, 'Loading cached results…');
       const cacheResp = await fetch(`/api/ocr_results/${SESSION_ID}`);
       const cacheJson = await cacheResp.json();
       if (Array.isArray(cacheJson) && cacheJson.length > 0) {
         ocrResults   = cacheJson;
         ocrDonePages = cacheJson.length;
         renderOcrBlocksForPage(currentPage);
+        hideOcrProgress();
         return;
       }
     }
 
     // Step 3: OCR each page one at a time
-    showOcrProgress(0, totalPages);
+    showOcrProgress(0, totalPages, 'Starting OCR…');
     for (let p = 1; p <= totalPages; p++) {
       updateOcrProgress(p, totalPages);
       await ocrOnePage(p);
@@ -251,20 +288,100 @@ async function ocrOnePage(pageNum) {
 // ============================================================
 // OCR progress banner
 // ============================================================
-function showOcrProgress(done, total) {
+function showOcrProgress(done, total, stepLabel) {
   const banner = document.getElementById('ocrProgressBanner');
   banner.style.display = 'flex';
-  updateOcrProgress(done, total);
+  updateOcrProgress(done, total, stepLabel);
 }
 
-function updateOcrProgress(done, total) {
+function updateOcrProgress(done, total, stepLabel) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   const el = document.getElementById('ocrProgressText');
-  if (el) el.textContent = `Extracting text — page ${done} of ${total}…`;
+  const stepEl = document.getElementById('ocrProgressStep');
+  const barEl = document.getElementById('ocrProgressBar');
+  const pctEl = document.getElementById('ocrProgressPct');
+
+  if (el) {
+    if (done < total) {
+      el.textContent = `OCR: page ${done} of ${total} extracted`;
+    } else if (total > 0) {
+      el.textContent = `OCR complete — ${total} page${total !== 1 ? 's' : ''} processed`;
+    } else {
+      el.textContent = 'Extracting text…';
+    }
+  }
+  if (stepEl) stepEl.textContent = stepLabel ? `— ${stepLabel}` : '';
+  if (barEl) barEl.style.width = pct + '%';
+  if (pctEl) pctEl.textContent = pct + '%';
 }
 
 function hideOcrProgress() {
   const banner = document.getElementById('ocrProgressBanner');
   if (banner) banner.style.display = 'none';
+}
+
+// ============================================================
+// PDF annotation extraction
+// ============================================================
+async function loadPdfAnnotations() {
+  try {
+    const resp = await fetch(`/api/pdf_annotations/${SESSION_ID}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!Array.isArray(data) || data.length === 0) return;
+
+    // Filter out any that are already imported
+    const existingIds = new Set(annotations.map(a => a.id));
+    pdfAnnotations = data.filter(a => !existingIds.has(a.id));
+    if (pdfAnnotations.length === 0) return;
+
+    // Show import banner
+    const banner = document.getElementById('pdfAnnotBanner');
+    const countEl = document.getElementById('pdfAnnotCount');
+    if (banner && countEl) {
+      countEl.textContent = pdfAnnotations.length;
+      banner.classList.add('visible');
+    }
+  } catch (_) { /* non-critical */ }
+}
+
+function importPdfAnnotations() {
+  if (pdfAnnotations.length === 0) return;
+  const importedCount = pdfAnnotations.length;
+  pdfAnnotations.forEach(a => annotations.push(a));
+  pdfAnnotations = [];
+  renderAnnotations();
+  saveAnnotations();
+  dismissPdfAnnotBanner();
+  showToast(`✅ ${importedCount} annotation${importedCount !== 1 ? 's' : ''} imported from PDF.`, 'success');
+}
+
+function dismissPdfAnnotBanner() {
+  const banner = document.getElementById('pdfAnnotBanner');
+  if (banner) banner.classList.remove('visible');
+  pdfAnnotations = [];
+}
+
+// ============================================================
+// Mobile tab switching
+// ============================================================
+function switchMobileTab(tab) {
+  const pdfPanel = document.getElementById('pdfPanel');
+  const annPanel = document.getElementById('annPanel');
+  const tabPdfBtn = document.getElementById('tabPdfBtn');
+  const tabAnnBtn = document.getElementById('tabAnnBtn');
+
+  if (tab === 'pdf') {
+    pdfPanel.classList.remove('tab-hidden'); pdfPanel.classList.add('tab-active');
+    annPanel.classList.remove('tab-active'); annPanel.classList.add('tab-hidden');
+    tabPdfBtn.classList.add('active'); tabPdfBtn.setAttribute('aria-selected', 'true');
+    tabAnnBtn.classList.remove('active'); tabAnnBtn.setAttribute('aria-selected', 'false');
+  } else {
+    annPanel.classList.remove('tab-hidden'); annPanel.classList.add('tab-active');
+    pdfPanel.classList.remove('tab-active'); pdfPanel.classList.add('tab-hidden');
+    tabAnnBtn.classList.add('active'); tabAnnBtn.setAttribute('aria-selected', 'true');
+    tabPdfBtn.classList.remove('active'); tabPdfBtn.setAttribute('aria-selected', 'false');
+  }
 }
 
 // ============================================================
@@ -282,6 +399,10 @@ function renderPage(pageNum) {
   document.getElementById('pageIndicator').textContent = `${pageNum} / ${totalPages}`;
   document.getElementById('prevPage').disabled = pageNum === 1;
   document.getElementById('nextPage').disabled = pageNum === totalPages;
+
+  // Update the "Add for Page N" button label
+  const manualPageNum = document.getElementById('addManualPageNum');
+  if (manualPageNum) manualPageNum.textContent = pageNum;
 
   // Load page image
   const img = document.getElementById('pdfPageImg');
@@ -341,6 +462,8 @@ function addFromBlock(blockIdx) {
 
 document.getElementById('addManualBtn').addEventListener('click', () => {
   addAnnotation('', 'comment', currentPage);
+  // On mobile, switch to the annotations tab so the user sees the new item
+  switchMobileTab('ann');
 });
 
 function addAnnotation(text, type, page) {
@@ -366,9 +489,12 @@ function addAnnotation(text, type, page) {
 function renderAnnotations() {
   const list = document.getElementById('annList');
   document.getElementById('annCount').textContent = annotations.length;
+  // Also update the tab badge on mobile
+  const tabBadge = document.getElementById('annCountTab');
+  if (tabBadge) tabBadge.textContent = annotations.length;
 
   if (annotations.length === 0) {
-    list.innerHTML = '<p class="muted empty-msg">No annotations yet.<br />Click ➕ on a text block to add one.</p>';
+    list.innerHTML = '<p class="muted empty-msg">No annotations yet.<br />Click ➕ on a text block to add one,<br />or use <strong>+ Add for Page N</strong> to write one manually.</p>';
     return;
   }
 
@@ -376,16 +502,21 @@ function renderAnnotations() {
     <div class="ann-item" data-ann-id="${ann.id}">
       <div class="ann-item-header">
         <span class="ann-num">#${idx + 1}</span>
-        ${ann.page ? `<span class="ann-page">Page ${ann.page}</span>` : ''}
-        <select class="ann-type-select" onchange="updateAnnType('${ann.id}', this.value)">
+        ${ann.page ? `<span class="ann-page">p.${ann.page}</span>` : ''}
+        ${ann.source === 'pdf_annotation' ? '<span class="src-badge printed" title="Imported from PDF">PDF</span>' : ''}
+        <select class="ann-type-select" onchange="updateAnnType('${ann.id}', this.value)"
+                aria-label="Annotation type for item ${idx + 1}">
           <option value="comment"  ${ann.type === 'comment'  ? 'selected' : ''}>💬 Comment</option>
           <option value="insert"   ${ann.type === 'insert'   ? 'selected' : ''}>➕ Insert</option>
           <option value="delete"   ${ann.type === 'delete'   ? 'selected' : ''}>🗑 Delete</option>
         </select>
-        <button class="btn-icon btn-delete-ann" onclick="deleteAnnotation('${ann.id}')" title="Remove">✕</button>
+        <button class="btn-icon btn-delete-ann" onclick="deleteAnnotation('${ann.id}')"
+                title="Remove annotation" aria-label="Remove annotation ${idx + 1}">✕</button>
       </div>
+      <p class="ann-page-hint">${ANN_TYPE_HELP[ann.type] || ''}</p>
       <textarea class="ann-text"
-                placeholder="Annotation text…"
+                placeholder="Enter text for this annotation…"
+                aria-label="Annotation ${idx + 1} text"
                 oninput="updateAnnText('${ann.id}', this.value)">${escHtml(ann.text)}</textarea>
     </div>
   `).join('');

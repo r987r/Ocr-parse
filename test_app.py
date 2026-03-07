@@ -1540,5 +1540,221 @@ class TestPageByPageOCR(unittest.TestCase):
         self.assertEqual(resp.content_type, "image/png")
 
 
+class TestMobileAccessibility(unittest.TestCase):
+    """Tests confirming mobile-accessibility markup in rendered HTML pages."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def _upload_session(self):
+        """Create a session and return its session_id."""
+        buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        return json.loads(resp.data)["session_id"]
+
+    def tearDown(self):
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    # ---- index page ----
+
+    def test_index_has_viewport_meta(self):
+        """Upload page must have a responsive viewport meta tag."""
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'name="viewport"', resp.data)
+        self.assertIn(b'width=device-width', resp.data)
+
+    def test_index_has_skip_link(self):
+        """Upload page must contain a skip-to-content link for keyboard users."""
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'skip-link', resp.data)
+        self.assertIn(b'#uploadForm', resp.data)
+
+    def test_index_form_has_accessible_labels(self):
+        """File inputs on the upload page must have associated labels."""
+        resp = self.client.get("/")
+        html = resp.data.decode()
+        self.assertIn('for="annotated_pdf"', html)
+        self.assertIn('id="annotated_pdf"', html)
+
+    # ---- review page ----
+
+    def test_review_has_viewport_meta(self):
+        """Review page must have a responsive viewport meta tag."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'name="viewport"', resp.data)
+        self.assertIn(b'width=device-width', resp.data)
+
+    def test_review_has_skip_link(self):
+        """Review page must contain a skip-to-content link."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'skip-link', resp.data)
+        self.assertIn(b'#annPanel', resp.data)
+
+    def test_review_has_mobile_tabs(self):
+        """Review page must contain the mobile tab navigation element."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b'mobile-tabs', resp.data)
+        self.assertIn(b'tabPdfBtn', resp.data)
+        self.assertIn(b'tabAnnBtn', resp.data)
+
+    def test_review_panels_have_aria_labels(self):
+        """PDF and annotation panels must have ARIA region/label attributes."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        self.assertIn('role="region"', html)
+        self.assertIn('aria-label="PDF viewer"', html)
+        self.assertIn('aria-label="Annotation editor"', html)
+
+    def test_review_nav_buttons_have_aria_labels(self):
+        """Prev/next page navigation buttons must have aria-label attributes."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        self.assertIn('aria-label="Previous page"', html)
+        self.assertIn('aria-label="Next page"', html)
+
+    def test_review_progress_banner_has_live_region(self):
+        """OCR progress banner must have aria-live for screen-reader updates."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        # The banner with aria-live should be present
+        self.assertIn('aria-live="polite"', html)
+        self.assertIn('ocrProgressBanner', html)
+        # Progress bar element should be present
+        self.assertIn('ocrProgressBar', html)
+
+    def test_review_add_manual_button_shows_page(self):
+        """'Add' button must include a page number indicator span."""
+        sid = self._upload_session()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        self.assertIn('addManualPageNum', html)
+        self.assertIn('Add for Page', html)
+
+
+class TestPDFAnnotationExtraction(unittest.TestCase):
+    """Tests for the /api/pdf_annotations/<session_id> endpoint."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def tearDown(self):
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    def _make_pdf_with_annotations(self):
+        """Create a PDF with embedded text annotations using PyMuPDF."""
+        import pymupdf
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.add_text_annot((100, 100), "Review this section")
+        page.add_text_annot((100, 200), "Check figure caption")
+        buf = io.BytesIO(doc.tobytes())
+        buf.seek(0)
+        return buf
+
+    def _upload(self, pdf_buf):
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test_annotated.pdf")},
+            content_type="multipart/form-data",
+        )
+        return json.loads(resp.data)["session_id"]
+
+    def test_pdf_annotations_unknown_session_returns_404(self):
+        """GET /api/pdf_annotations/<unknown> returns 404."""
+        resp = self.client.get("/api/pdf_annotations/nonexistent-session-id")
+        self.assertEqual(resp.status_code, 404)
+        data = json.loads(resp.data)
+        self.assertIn("error", data)
+
+    def test_pdf_annotations_plain_pdf_returns_empty_list(self):
+        """PDF with no embedded annotations returns an empty list."""
+        buf = _make_test_pdf()
+        sid = self._upload(buf)
+        resp = self.client.get(f"/api/pdf_annotations/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertIsInstance(data, list)
+        # A plain text PDF has no embedded annotations
+        self.assertEqual(len(data), 0)
+
+    def test_pdf_annotations_with_embedded_notes(self):
+        """PDF with sticky-note annotations returns them in the response."""
+        try:
+            import pymupdf
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+
+        pdf_buf = self._make_pdf_with_annotations()
+        sid = self._upload(pdf_buf)
+        resp = self.client.get(f"/api/pdf_annotations/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertIsInstance(data, list)
+        self.assertGreater(len(data), 0, "Should extract at least one annotation")
+
+        # Each annotation must have the required fields
+        for ann in data:
+            self.assertIn("id", ann)
+            self.assertIn("text", ann)
+            self.assertIn("type", ann)
+            self.assertIn("page", ann)
+            self.assertIn("source", ann)
+            self.assertEqual(ann["source"], "pdf_annotation")
+            self.assertIn(ann["type"], ("comment", "insert", "delete"))
+
+    def test_pdf_annotations_content_matches(self):
+        """The extracted annotation text should match the embedded content."""
+        try:
+            import pymupdf
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+
+        pdf_buf = self._make_pdf_with_annotations()
+        sid = self._upload(pdf_buf)
+        resp = self.client.get(f"/api/pdf_annotations/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        texts = [a["text"] for a in data]
+        self.assertTrue(
+            any("Review this section" in t for t in texts),
+            f"Expected 'Review this section' in extracted annotations, got: {texts}",
+        )
+
+    def test_pdf_annotations_page_numbers_correct(self):
+        """Annotation page numbers should start at 1."""
+        try:
+            import pymupdf
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+
+        pdf_buf = self._make_pdf_with_annotations()
+        sid = self._upload(pdf_buf)
+        resp = self.client.get(f"/api/pdf_annotations/{sid}")
+        data = json.loads(resp.data)
+        for ann in data:
+            self.assertGreaterEqual(ann["page"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,8 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
+import storage
+
 app = Flask(__name__)
 
 _DEV_SECRET = "ocr-parse-dev-secret-change-me"
@@ -138,7 +140,18 @@ def _session_dir(session_id: str) -> Path:
     return d
 
 
+def _s3_key(path: Path) -> str:
+    """Return the S3 object key for *path* (path relative to UPLOAD_BASE)."""
+    try:
+        return str(path.relative_to(UPLOAD_BASE)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
+
+
 def _load_json(path: Path, default=None):
+    if not path.exists() and storage.is_s3_enabled():
+        # Attempt to restore the file from S3 before giving up.
+        storage.s3_download(_s3_key(path), path)
     if path.exists():
         with path.open() as f:
             return json.load(f)
@@ -148,6 +161,9 @@ def _load_json(path: Path, default=None):
 def _save_json(path: Path, data):
     with path.open("w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    # Persist to S3 so the data survives a server restart.
+    if storage.is_s3_enabled():
+        storage.s3_upload(path, _s3_key(path))
 
 
 def _append_debug_log(entry: dict[str, Any]):
@@ -185,12 +201,40 @@ def _log_upload_failure(
         _append_debug_log(entry)
 
 
+def _restore_session_from_s3(session_id: str) -> bool:
+    """Download all persisted files for *session_id* from S3 to the local cache.
+
+    Returns True when at least one file was restored (meaning the session
+    exists in S3), False when S3 is disabled or the session is not there.
+    Page images (``pages/`` sub-directory) are intentionally skipped because
+    they are large and can be regenerated from the PDF on demand.
+    """
+    if not storage.is_s3_enabled():
+        return False
+    prefix = f"{session_id}/"
+    keys = storage.s3_list_keys(prefix)
+    if not keys:
+        return False
+    restored = False
+    for key in keys:
+        rel = key[len(prefix):]  # strip the session-id prefix
+        # Skip page images – large binary files that can be regenerated.
+        if rel.startswith("pages/"):
+            continue
+        local_path = UPLOAD_BASE / session_id / rel
+        if storage.s3_download(key, local_path):
+            restored = True
+    return restored
+
+
 def _cleanup_session(session_id: str):
     """Remove all files for a session and deregister its access token."""
     _unregister_tokens_for_session(session_id)
     sdir = UPLOAD_BASE / session_id
     if sdir.exists():
         shutil.rmtree(sdir, ignore_errors=True)
+    # Also remove S3 objects so storage is not leaked after session expiry.
+    storage.s3_delete_prefix(f"{session_id}/")
 
 
 def _cleanup_old_sessions():
@@ -468,6 +512,8 @@ def upload():
     except Exception as exc:
         _log_upload_failure(debug_mode, f"File save failed: {exc}", "save_error")
         return jsonify({"error": f"Failed to save uploaded file: {exc}"}), 500
+    # Back up to S3 for persistence across server restarts.
+    storage.s3_upload(sdir / "annotated.pdf", f"{session_id}/annotated.pdf")
 
     # Save optional original document
     has_original = False
@@ -478,6 +524,7 @@ def upload():
             orig_ext = orig_file.filename.rsplit(".", 1)[1].lower()
             orig_file.save(str(sdir / f"original.{orig_ext}"))
             has_original = True
+            storage.s3_upload(sdir / f"original.{orig_ext}", f"{session_id}/original.{orig_ext}")
 
     # Persist config – always use Tesseract (free, local)
     config = {
@@ -504,11 +551,12 @@ def review(session_id):
     """Render the review/edit page."""
     sdir = UPLOAD_BASE / session_id
     if not sdir.exists():
-        # Return a styled "session not found" page so the user knows to re-upload
-        return (
-            render_template("session_expired.html"),
-            404,
-        )
+        # Attempt to restore the session from S3 before giving up.
+        if not _restore_session_from_s3(session_id):
+            return (
+                render_template("session_expired.html"),
+                404,
+            )
     config = _load_json(sdir / "config.json", {})
     if not config:
         return (
@@ -534,7 +582,7 @@ def token_redirect(access_token):
     if not session_id:
         abort(404)
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         abort(404)
     return redirect(url_for("review", session_id=session_id))
 
@@ -589,7 +637,7 @@ def process(session_id):
     cached data is returned immediately without re-processing.
     """
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
 
     config = _load_json(sdir / "config.json", {})
@@ -744,7 +792,7 @@ def process_init(session_id):
     conversion never happens twice for the same session.
     """
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
 
     pdf_path = sdir / "annotated.pdf"
@@ -836,7 +884,7 @@ def process_page(session_id, page_num):
     legacy ``/api/process/<session_id>`` endpoint can still serve cached results.
     """
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
 
     pages_dir = sdir / "pages"
@@ -951,7 +999,7 @@ def process_page(session_id, page_num):
 def get_page_image(session_id, page_num):
     """Serve a PNG image of a PDF page (1-indexed)."""
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         abort(404)
     pages_dir = sdir / "pages"
 
@@ -976,7 +1024,7 @@ def get_pdf_annotations(session_id):
     format so they can be pre-populated in the review interface.
     """
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
 
     pdf_path = sdir / "annotated.pdf"
@@ -1040,7 +1088,7 @@ def get_pdf_annotations(session_id):
 @app.route("/api/annotations/<session_id>", methods=["GET"])
 def get_annotations(session_id):
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
     return jsonify(_load_json(sdir / "annotations.json", []))
 
@@ -1048,7 +1096,7 @@ def get_annotations(session_id):
 @app.route("/api/annotations/<session_id>", methods=["POST"])
 def save_annotations(session_id):
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
     data = request.get_json(force=True)
     if not isinstance(data, list):
@@ -1061,7 +1109,7 @@ def save_annotations(session_id):
 def export_document(session_id):
     """Generate and stream the Word document."""
     sdir = UPLOAD_BASE / session_id
-    if not sdir.exists():
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
         return jsonify({"error": "Session not found."}), 404
 
     config = _load_json(sdir / "config.json", {})

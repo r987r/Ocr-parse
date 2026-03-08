@@ -1834,5 +1834,246 @@ class TestPDFAnnotationExtraction(unittest.TestCase):
             self.assertGreaterEqual(ann["page"], 1)
 
 
+
+class TestS3Storage(unittest.TestCase):
+    """Tests for S3-compatible cloud storage persistence (storage.py)."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def tearDown(self):
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+        for f in Path(_test_upload_dir).glob("*.json"):
+            f.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # storage.py unit tests
+    # ------------------------------------------------------------------
+
+    def test_s3_disabled_when_no_env_vars(self):
+        """is_s3_enabled() returns False when credentials are absent."""
+        import storage as storage_module
+        env = {k: "" for k in ("S3_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")}
+        with unittest.mock.patch.dict(os.environ, env):
+            self.assertFalse(storage_module.is_s3_enabled())
+
+    def test_s3_enabled_when_all_env_vars_set(self):
+        """is_s3_enabled() returns True when bucket and credentials are set."""
+        import storage as storage_module
+        env = {
+            "S3_BUCKET": "test-bucket",
+            "AWS_ACCESS_KEY_ID": "AKIATEST",
+            "AWS_SECRET_ACCESS_KEY": "test-secret",
+        }
+        with unittest.mock.patch.dict(os.environ, env):
+            self.assertTrue(storage_module.is_s3_enabled())
+
+    def test_s3_upload_noop_when_disabled(self):
+        """s3_upload returns False silently when S3 is not configured."""
+        import storage as storage_module
+        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False):
+            result = storage_module.s3_upload(Path("/tmp/nonexistent.json"), "some/key")
+            self.assertFalse(result)
+
+    def test_s3_download_noop_when_disabled(self):
+        """s3_download returns False silently when S3 is not configured."""
+        import storage as storage_module
+        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False):
+            result = storage_module.s3_download("some/key", Path("/tmp/target.json"))
+            self.assertFalse(result)
+
+    def test_s3_list_keys_returns_empty_when_disabled(self):
+        """s3_list_keys returns [] when S3 is not configured."""
+        import storage as storage_module
+        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False):
+            self.assertEqual(storage_module.s3_list_keys("prefix/"), [])
+
+    def test_s3_delete_prefix_noop_when_disabled(self):
+        """s3_delete_prefix does nothing when S3 is not configured."""
+        import storage as storage_module
+        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False):
+            # Should not raise
+            storage_module.s3_delete_prefix("prefix/")
+
+    # ------------------------------------------------------------------
+    # app.py integration tests (mocked S3)
+    # ------------------------------------------------------------------
+
+    def test_save_json_uploads_to_s3_when_enabled(self):
+        """_save_json should upload the file to S3 when S3 is enabled."""
+        import storage as storage_module
+        test_path = Path(_test_upload_dir) / "test_upload.json"
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_upload", return_value=True) as mock_upload,
+        ):
+            app_module._save_json(test_path, {"key": "value"})
+            mock_upload.assert_called_once()
+            call_args = mock_upload.call_args
+            # First positional arg is the local path
+            self.assertEqual(call_args[0][0], test_path)
+
+    def test_save_json_no_upload_when_s3_disabled(self):
+        """_save_json must not call s3_upload when S3 is disabled."""
+        import storage as storage_module
+        test_path = Path(_test_upload_dir) / "test_no_upload.json"
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False),
+            unittest.mock.patch.object(storage_module, "s3_upload") as mock_upload,
+        ):
+            app_module._save_json(test_path, {"x": 1})
+            mock_upload.assert_not_called()
+
+    def test_load_json_fetches_from_s3_when_missing_locally(self):
+        """_load_json should attempt an S3 download when the file is absent locally."""
+        import storage as storage_module
+        missing = Path(_test_upload_dir) / "missing.json"
+        self.assertFalse(missing.exists())
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_download", return_value=False) as mock_dl,
+        ):
+            result = app_module._load_json(missing, {})
+            mock_dl.assert_called_once()
+            self.assertEqual(result, {})
+
+    def test_load_json_no_s3_call_when_file_exists(self):
+        """_load_json must not call S3 when the file already exists locally."""
+        import storage as storage_module
+        local = Path(_test_upload_dir) / "existing.json"
+        local.write_text('{"found": true}')
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_download") as mock_dl,
+        ):
+            result = app_module._load_json(local, {})
+            mock_dl.assert_not_called()
+            self.assertEqual(result, {"found": True})
+
+    def test_restore_session_from_s3_returns_false_when_disabled(self):
+        """_restore_session_from_s3 returns False immediately when S3 is off."""
+        import storage as storage_module
+        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False):
+            result = app_module._restore_session_from_s3("any-session-id")
+            self.assertFalse(result)
+
+    def test_restore_session_from_s3_returns_false_when_not_in_s3(self):
+        """_restore_session_from_s3 returns False when S3 has no matching keys."""
+        import storage as storage_module
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=[]),
+        ):
+            result = app_module._restore_session_from_s3("ghost-session")
+            self.assertFalse(result)
+
+    def test_restore_session_from_s3_creates_local_files(self):
+        """_restore_session_from_s3 downloads S3 objects and creates the session dir."""
+        import storage as storage_module
+        session_id = str(uuid.uuid4())
+        session_dir = Path(_test_upload_dir) / session_id
+        self.assertFalse(session_dir.exists())
+
+        fake_keys = [f"{session_id}/config.json", f"{session_id}/annotations.json"]
+
+        def fake_download(key, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if key.endswith("config.json"):
+                path.write_text(json.dumps({"session_id": session_id}))
+            else:
+                path.write_text("[]")
+            return True
+
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=fake_keys),
+            unittest.mock.patch.object(storage_module, "s3_download", side_effect=fake_download),
+        ):
+            result = app_module._restore_session_from_s3(session_id)
+
+        self.assertTrue(result)
+        self.assertTrue(session_dir.exists())
+        self.assertTrue((session_dir / "config.json").exists())
+        self.assertTrue((session_dir / "annotations.json").exists())
+
+    def test_restore_session_skips_page_images(self):
+        """_restore_session_from_s3 must not download page images (they are regenerated)."""
+        import storage as storage_module
+        session_id = str(uuid.uuid4())
+
+        fake_keys = [
+            f"{session_id}/config.json",
+            f"{session_id}/pages/page0001.png",  # should be skipped
+        ]
+        downloaded_keys: list = []
+
+        def fake_download(key, path):
+            downloaded_keys.append(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}")
+            return True
+
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=fake_keys),
+            unittest.mock.patch.object(storage_module, "s3_download", side_effect=fake_download),
+        ):
+            app_module._restore_session_from_s3(session_id)
+
+        self.assertNotIn(f"{session_id}/pages/page0001.png", downloaded_keys)
+        self.assertIn(f"{session_id}/config.json", downloaded_keys)
+
+    def test_cleanup_session_deletes_s3_prefix(self):
+        """_cleanup_session deletes S3 objects for the session when S3 is enabled."""
+        import storage as storage_module
+        session_id = str(uuid.uuid4())
+        session_dir = Path(_test_upload_dir) / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "config.json").write_text("{}")
+
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_delete_prefix") as mock_del,
+        ):
+            app_module._cleanup_session(session_id)
+            mock_del.assert_called_once_with(f"{session_id}/")
+
+        self.assertFalse(session_dir.exists())
+
+    def test_review_restores_session_from_s3(self):
+        """GET /review/<sid> should restore from S3 if the session directory is missing."""
+        session_id = str(uuid.uuid4())
+        session_dir = Path(_test_upload_dir) / session_id
+        self.assertFalse(session_dir.exists())
+
+        def fake_restore(sid):
+            d = Path(_test_upload_dir) / sid
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "config.json").write_text(
+                json.dumps({"session_id": sid, "ocr_engine": "tesseract"})
+            )
+            return True
+
+        with unittest.mock.patch.object(app_module, "_restore_session_from_s3", side_effect=fake_restore):
+            resp = self.client.get(f"/review/{session_id}")
+
+        self.assertEqual(resp.status_code, 200)
+
+    def test_review_returns_404_when_s3_restore_fails(self):
+        """GET /review/<sid> returns 404 when S3 restoration finds nothing."""
+        session_id = str(uuid.uuid4())
+        with unittest.mock.patch.object(app_module, "_restore_session_from_s3", return_value=False):
+            resp = self.client.get(f"/review/{session_id}")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_s3_key_is_relative_to_upload_base(self):
+        """_s3_key returns path relative to UPLOAD_BASE with forward slashes."""
+        path = app_module.UPLOAD_BASE / "abc123" / "config.json"
+        key = app_module._s3_key(path)
+        self.assertEqual(key, "abc123/config.json")
+
 if __name__ == "__main__":
     unittest.main()

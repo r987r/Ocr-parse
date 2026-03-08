@@ -6,3 +6,25 @@ services:
     envVars:
       - key: SECRET_KEY
         generateValue: true
+      # ---------------------------------------------------------------------------
+      # Optional: S3-compatible storage for session persistence across restarts.
+      # Set S3_BUCKET + credentials to keep uploaded files and OCR results alive
+      # after Render redeploys or restarts the container.
+      #
+      # Free options:
+      #   Backblaze B2  – https://www.backblaze.com/cloud-storage  (10 GB free)
+      #   Cloudflare R2 – https://developers.cloudflare.com/r2/    (10 GB/month free)
+      #   AWS S3         – https://aws.amazon.com/s3/              (pay-per-use)
+      #
+      # See README.md → "Persistent Storage" for step-by-step setup instructions.
+      # ---------------------------------------------------------------------------
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_DEFAULT_REGION
+        value: us-east-1

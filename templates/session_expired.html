@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Session Expired – OCR Parse</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  <style>
+    .expired-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2rem;
+      text-align: center;
+      background: var(--bg, #f3f4f6);
+    }
+    .expired-card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.1);
+      padding: 2.5rem 3rem;
+      max-width: 480px;
+      width: 100%;
+    }
+    .expired-icon { font-size: 3rem; margin-bottom: 1rem; }
+    .expired-card h1 { margin: 0 0 .75rem; font-size: 1.5rem; color: #1f2937; }
+    .expired-card p  { color: #6b7280; margin: 0 0 1.5rem; line-height: 1.6; }
+    .btn-upload {
+      display: inline-block;
+      background: #2563eb;
+      color: #fff;
+      padding: .75rem 1.75rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1rem;
+      transition: background .15s;
+    }
+    .btn-upload:hover { background: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <div class="expired-wrap">
+    <div class="expired-card">
+      <div class="expired-icon">⏳</div>
+      <h1>Session Not Found</h1>
+      <p>
+        This document session no longer exists — it may have expired, or the
+        server was restarted. Please upload your PDF again to start a new
+        review session.
+      </p>
+      <a href="/" class="btn-upload">📄 Upload a New Document</a>
+    </div>
+  </div>
+</body>
+</html>

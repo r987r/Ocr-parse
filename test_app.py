@@ -823,12 +823,43 @@ class TestSecurity(unittest.TestCase):
         resp = self.client.get("/review/nonexistent-session-id-xyz")
         self.assertEqual(resp.status_code, 404)
 
+    def test_review_page_invalid_session_shows_expired_template(self):
+        """Review page for a missing session renders the session-expired template."""
+        resp = self.client.get("/review/nonexistent-session-id-xyz")
+        self.assertEqual(resp.status_code, 404)
+        # Should render the session_expired template, not a bare 404 message
+        self.assertIn(b"Session Not Found", resp.data)
+        self.assertIn(b"Upload a New Document", resp.data)
+
+    def test_review_page_has_no_cache_headers(self):
+        """Review page response includes Cache-Control: no-store to prevent stale caching."""
+        # Create a valid session
+        pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        sid = json.loads(resp.data)["session_id"]
+        review_resp = self.client.get(f"/review/{sid}")
+        self.assertEqual(review_resp.status_code, 200)
+        cache_control = review_resp.headers.get("Cache-Control", "")
+        self.assertIn("no-store", cache_control)
+
     def test_review_page_empty_config_returns_404(self):
         """Review page returns 404 when config.json is missing/empty."""
         sid = str(uuid.uuid4())
         (Path(_test_upload_dir) / sid).mkdir()
         resp = self.client.get(f"/review/{sid}")
         self.assertEqual(resp.status_code, 404)
+
+    def test_review_page_empty_config_shows_expired_template(self):
+        """Review page with missing config renders the session-expired template."""
+        sid = str(uuid.uuid4())
+        (Path(_test_upload_dir) / sid).mkdir()
+        resp = self.client.get(f"/review/{sid}")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn(b"Session Not Found", resp.data)
 
 
 class TestEmailNotifications(unittest.TestCase):

@@ -32,6 +32,7 @@ from flask import (
     abort,
     redirect,
     url_for,
+    make_response,
 )
 from werkzeug.utils import secure_filename
 
@@ -394,9 +395,12 @@ def request_entity_too_large(error):
 
 @app.errorhandler(404)
 def not_found_error(error):
-    """Return JSON for API 404s; simple HTML for UI routes."""
+    """Return JSON for API 404s; styled HTML for UI routes."""
     if request.path.startswith("/api/"):
         return jsonify({"error": "Resource not found.", "error_type": "not_found"}), 404
+    # For review routes, show a helpful "session expired" page
+    if request.path.startswith("/review/") or request.path.startswith("/r/"):
+        return render_template("session_expired.html"), 404
     return (
         "<h1>404 – Not Found</h1><p><a href='/'>Go back to the upload page</a></p>",
         404,
@@ -500,11 +504,25 @@ def review(session_id):
     """Render the review/edit page."""
     sdir = UPLOAD_BASE / session_id
     if not sdir.exists():
-        abort(404)
+        # Return a styled "session not found" page so the user knows to re-upload
+        return (
+            render_template("session_expired.html"),
+            404,
+        )
     config = _load_json(sdir / "config.json", {})
     if not config:
-        abort(404)
-    return render_template("review.html", session_id=session_id, config=config, debug_mode=DEBUG_MODE)
+        return (
+            render_template("session_expired.html"),
+            404,
+        )
+    resp = make_response(
+        render_template("review.html", session_id=session_id, config=config, debug_mode=DEBUG_MODE)
+    )
+    # Prevent browser from caching the review page; a stale cached page would
+    # continue running JavaScript against an already-deleted session.
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/r/<access_token>")
@@ -1022,6 +1040,8 @@ def get_pdf_annotations(session_id):
 @app.route("/api/annotations/<session_id>", methods=["GET"])
 def get_annotations(session_id):
     sdir = UPLOAD_BASE / session_id
+    if not sdir.exists():
+        return jsonify({"error": "Session not found."}), 404
     return jsonify(_load_json(sdir / "annotations.json", []))
 
 

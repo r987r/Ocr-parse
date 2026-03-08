@@ -1835,6 +1835,231 @@ class TestPDFAnnotationExtraction(unittest.TestCase):
 
 
 
+class TestOCRBlocksBbox(unittest.TestCase):
+    """Tests for OCR block bounding box extraction."""
+
+    def test_tesseract_blocks_include_bbox(self):
+        """Tesseract blocks include bbox with percentage coordinates."""
+        from PIL import Image, ImageDraw
+        from ocr_engine import OCREngine
+
+        img = Image.new("RGB", (400, 100), color="white")
+        draw = ImageDraw.Draw(img)
+        draw.text((20, 30), "Hello World Test 123", fill="black")
+
+        engine = OCREngine(engine="tesseract")
+        blocks = engine.extract_text_blocks(img)
+
+        for block in blocks:
+            self.assertIn("bbox", block)
+            bbox = block["bbox"]
+            self.assertIn("x", bbox)
+            self.assertIn("y", bbox)
+            self.assertIn("w", bbox)
+            self.assertIn("h", bbox)
+            # Coordinates should be percentages (0-100)
+            self.assertGreaterEqual(bbox["x"], 0)
+            self.assertLessEqual(bbox["x"], 100)
+            self.assertGreaterEqual(bbox["y"], 0)
+            self.assertLessEqual(bbox["y"], 100)
+
+    def test_tesseract_empty_image_no_bbox(self):
+        """Blank image returns empty list, no bbox errors."""
+        from PIL import Image
+        from ocr_engine import OCREngine
+
+        engine = OCREngine(engine="tesseract")
+        img = Image.new("RGB", (100, 100), color="white")
+        blocks = engine.extract_text_blocks(img)
+        self.assertIsInstance(blocks, list)
+
+
+class TestLiveDebugEndpoint(unittest.TestCase):
+    """Tests for the /api/debug/live/<session_id> endpoint."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+        self._orig_debug = app_module.DEBUG_MODE
+
+    def tearDown(self):
+        app_module.DEBUG_MODE = self._orig_debug
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    def _upload(self, pdf_buf=None):
+        if pdf_buf is None:
+            pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        return json.loads(resp.data)["session_id"]
+
+    def test_live_debug_unknown_session_returns_404(self):
+        """GET /api/debug/live/<unknown> returns 404."""
+        app_module.DEBUG_MODE = True
+        resp = self.client.get("/api/debug/live/nonexistent-session")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_live_debug_returns_session_info(self):
+        """Live debug returns session info with events array."""
+        app_module.DEBUG_MODE = True
+        sid = self._upload()
+        resp = self.client.get(f"/api/debug/live/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertIn("session_id", data)
+        self.assertIn("events", data)
+        self.assertIn("system", data)
+        self.assertIsInstance(data["events"], list)
+
+    def test_live_debug_disabled_returns_flag(self):
+        """When DEBUG_MODE is off, live debug returns debug_mode=false."""
+        app_module.DEBUG_MODE = False
+        resp = self.client.get("/api/debug/live/any-session")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertFalse(data.get("debug_mode"))
+
+
+class TestAnnotationsScalableModel(unittest.TestCase):
+    """Tests for extended annotation model with location/source fields."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def tearDown(self):
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    def _upload(self, pdf_buf=None):
+        if pdf_buf is None:
+            pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        return json.loads(resp.data)["session_id"]
+
+    def test_save_annotations_with_location(self):
+        """Annotations with x, y, source, extraction_type fields round-trip correctly."""
+        sid = self._upload()
+        anns = [
+            {
+                "id": "test-1",
+                "text": "Located annotation",
+                "type": "comment",
+                "page": 1,
+                "x": 25.5,
+                "y": 42.3,
+                "source": "ocr",
+                "extraction_type": "text_block",
+                "bbox": {"x": 20, "y": 40, "w": 30, "h": 5},
+                "added_at": "2025-01-01T00:00:00Z",
+            }
+        ]
+        resp = self.client.post(
+            f"/api/annotations/{sid}",
+            data=json.dumps(anns),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Load them back
+        resp = self.client.get(f"/api/annotations/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertEqual(len(data), 1)
+        ann = data[0]
+        self.assertEqual(ann["x"], 25.5)
+        self.assertEqual(ann["y"], 42.3)
+        self.assertEqual(ann["source"], "ocr")
+        self.assertEqual(ann["extraction_type"], "text_block")
+        self.assertIn("bbox", ann)
+        self.assertEqual(ann["bbox"]["x"], 20)
+
+    def test_save_annotations_without_location(self):
+        """Annotations without location fields still work (backward compat)."""
+        sid = self._upload()
+        anns = [
+            {"id": "test-2", "text": "No location", "type": "insert", "page": 1}
+        ]
+        resp = self.client.post(
+            f"/api/annotations/{sid}",
+            data=json.dumps(anns),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        resp = self.client.get(f"/api/annotations/{sid}")
+        data = json.loads(resp.data)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["type"], "insert")
+
+
+class TestReviewPageMarkers(unittest.TestCase):
+    """Tests that the review page includes marker overlay elements."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def tearDown(self):
+        for child in Path(_test_upload_dir).iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    def _upload(self, pdf_buf=None):
+        if pdf_buf is None:
+            pdf_buf = _make_test_pdf()
+        resp = self.client.post(
+            "/upload",
+            data={"annotated_pdf": (pdf_buf, "test.pdf")},
+            content_type="multipart/form-data",
+        )
+        return json.loads(resp.data)["session_id"]
+
+    def test_review_page_has_marker_overlay(self):
+        """Review page HTML contains the marker overlay div."""
+        sid = self._upload()
+        resp = self.client.get(f"/review/{sid}")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.data.decode()
+        self.assertIn('id="markerOverlay"', html)
+        self.assertIn('class="marker-overlay"', html)
+
+    def test_review_page_has_add_change_popup(self):
+        """Review page HTML contains the long-press add-change popup."""
+        sid = self._upload()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        self.assertIn('id="addChangePopup"', html)
+        self.assertIn('confirmAddChange', html)
+
+    def test_review_page_has_long_press_setup(self):
+        """Review page JS sets up long-press detection."""
+        sid = self._upload()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        self.assertIn('_setupLongPress', html)
+        self.assertIn('_onPointerDown', html)
+
+    def test_review_page_has_render_markers(self):
+        """Review page JS includes renderMarkers function."""
+        sid = self._upload()
+        resp = self.client.get(f"/review/{sid}")
+        html = resp.data.decode()
+        self.assertIn('renderMarkers', html)
+        self.assertIn('change-marker', html)
+
+
+
 class TestS3Storage(unittest.TestCase):
     """Tests for S3-compatible cloud storage persistence (storage.py)."""
 

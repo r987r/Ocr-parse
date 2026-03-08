@@ -83,7 +83,10 @@
       </div>
     </div>
     <div class="pdf-page-container" id="pdfPageContainer">
-      <img id="pdfPageImg" src="" alt="PDF page 1" class="pdf-page-img" />
+      <div class="pdf-page-wrapper" id="pdfPageWrapper">
+        <img id="pdfPageImg" src="" alt="PDF page 1" class="pdf-page-img" />
+        <div id="markerOverlay" class="marker-overlay"></div>
+      </div>
     </div>
 
     <!-- OCR blocks for current page -->
@@ -125,6 +128,34 @@
   </div>
 </div>
 
+<!-- ===== Change marker popup ===== -->
+<div id="markerPopup" class="marker-popup" style="display:none;">
+  <div class="marker-popup-header">
+    <span id="markerPopupTitle" class="marker-popup-title">Change</span>
+    <button class="btn-ghost marker-popup-close" onclick="closeMarkerPopup()" aria-label="Close popup">✕</button>
+  </div>
+  <div id="markerPopupBody" class="marker-popup-body"></div>
+</div>
+
+<!-- ===== Long-press add-change popup ===== -->
+<div id="addChangePopup" class="add-change-popup" style="display:none;">
+  <div class="marker-popup-header">
+    <span class="marker-popup-title">📌 Add Change</span>
+    <button class="btn-ghost marker-popup-close" onclick="closeAddChangePopup()" aria-label="Close">✕</button>
+  </div>
+  <div class="add-change-popup-body">
+    <textarea id="addChangeText" class="add-change-text" placeholder="Describe the change…" rows="3"></textarea>
+    <div class="add-change-actions">
+      <select id="addChangeType" class="ann-type-select">
+        <option value="comment" selected>💬 Comment</option>
+        <option value="insert">➕ Insert</option>
+        <option value="delete">🗑 Delete</option>
+      </select>
+      <button class="btn-primary" onclick="confirmAddChange()">Add</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== Error toast ===== -->
 <div id="toast" class="toast" style="display:none;"></div>
 
@@ -153,14 +184,18 @@
 // ============================================================
 // State
 // ============================================================
-let ocrResults   = [];     // [{page, blocks:[{text,confidence,block_num}]}]
-let annotations  = [];     // [{id, text, type, page}]
+let ocrResults   = [];     // [{page, blocks:[{text,confidence,block_num,bbox}]}]
+let annotations  = [];     // [{id, text, type, page, x, y, source, extraction_type}]
 let currentPage  = 1;
 let totalPages   = 1;
 let debugData    = null;   // debug info from /api/process response
 let ocrDonePages = 0;      // how many pages have been OCR-processed so far
 let pdfAnnotations = [];   // embedded PDF annotations pending import
 let sessionExpired = false; // true once we detect the session is gone
+let addedBlockKeys = new Set(); // track "page:blockIdx" keys to prevent duplicates
+let _debugPollTimer = null;     // timer id for live debug polling
+let _longPressTimer = null;     // timer for long-press detection
+let _longPressPos   = null;     // {x, y} percentage on page for long-press
 
 // Annotation type explanations shown below each annotation's type selector
 const ANN_TYPE_HELP = {
@@ -269,7 +304,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       document.querySelector('#processingOverlay small').textContent =
         'Please refresh the page to try again. If the problem persists, try a smaller PDF or check your connection.';
     }
-    if (DEBUG_MODE && debugData) renderDebugPanel();
+    if (DEBUG_MODE && debugData) {
+      const panel = document.getElementById('debugPanel');
+      if (panel && panel.style.display !== 'none') _pollDebugLog();
+    }
   }
 });
 
@@ -393,9 +431,19 @@ async function loadPdfAnnotations() {
 function importPdfAnnotations() {
   if (pdfAnnotations.length === 0) return;
   const importedCount = pdfAnnotations.length;
-  pdfAnnotations.forEach(a => annotations.push(a));
+  pdfAnnotations.forEach(a => {
+    // Ensure imported annotations have the new scalable fields
+    a.source = a.source || 'pdf_annotation';
+    a.extraction_type = a.extraction_type || 'embedded';
+    a.x = a.x || null;
+    a.y = a.y || null;
+    a.bbox = a.bbox || null;
+    a.added_at = a.added_at || new Date().toISOString();
+    annotations.push(a);
+  });
   pdfAnnotations = [];
   renderAnnotations();
+  renderMarkers();
   saveAnnotations();
   dismissPdfAnnotBanner();
   showToast(`✅ ${importedCount} annotation${importedCount !== 1 ? 's' : ''} imported from PDF.`, 'success');
@@ -496,15 +544,21 @@ function renderPage(pageNum) {
       }
     }).catch(() => showPageRetryUI(container, pageNum));
   };
+  img.onload = () => {
+    renderMarkers();
+    _setupLongPress();
+  };
   img.src = `/api/page/${SESSION_ID}/${pageNum}`;
   img.alt = `Page ${pageNum}`;
 
+  // Rebuild which blocks have been added on this page
+  _rebuildAddedBlockKeys();
   renderOcrBlocksForPage(pageNum);
 }
 
 function retryPageImage(pageNum) {
   const container = document.getElementById('pdfPageContainer');
-  container.innerHTML = '<img id="pdfPageImg" src="" alt="" class="pdf-page-img" />';
+  container.innerHTML = '<div class="pdf-page-wrapper" id="pdfPageWrapper"><img id="pdfPageImg" src="" alt="" class="pdf-page-img" /><div id="markerOverlay" class="marker-overlay"></div></div>';
   renderPage(pageNum);
 }
 
@@ -546,13 +600,18 @@ function renderOcrBlocks(blocks) {
     const confClass = conf >= 70 ? 'conf-high' : conf >= 40 ? 'conf-mid' : 'conf-low';
     const srcBadge = b.source_type
       ? `<span class="src-badge ${b.source_type}">${b.source_type}</span>` : '';
+    const blockKey = `${currentPage}:${idx}`;
+    const alreadyAdded = addedBlockKeys.has(blockKey);
+    const btnClass = alreadyAdded ? 'btn-add-ann btn-added' : 'btn-add-ann';
+    const btnLabel = alreadyAdded ? '✓ Added' : '➕ Add';
+    const btnDisabled = alreadyAdded ? 'disabled' : '';
     return `
       <div class="ocr-block" data-idx="${idx}" data-page="${currentPage}">
         <div class="ocr-block-header">
           <span class="conf-badge ${confClass}">conf: ${conf}%</span>
           ${srcBadge}
           <div class="ocr-block-actions">
-            <button class="btn-add-ann" onclick="addFromBlock(${idx})" title="Add as annotation">➕ Add</button>
+            <button class="${btnClass}" onclick="addFromBlock(${idx})" title="${alreadyAdded ? 'Already added' : 'Add as annotation'}" ${btnDisabled}>${btnLabel}</button>
           </div>
         </div>
         <div class="ocr-block-text" contenteditable="false">${escHtml(b.text)}</div>
@@ -564,11 +623,16 @@ function renderOcrBlocks(blocks) {
 // Annotations
 // ============================================================
 function addFromBlock(blockIdx) {
+  const blockKey = `${currentPage}:${blockIdx}`;
+  if (addedBlockKeys.has(blockKey)) return; // prevent duplicate
   const pageData = ocrResults.find(r => r.page === currentPage);
   if (!pageData) return;
   const block = pageData.blocks[blockIdx];
   if (!block) return;
-  addAnnotation(block.text, 'comment', currentPage);
+  addedBlockKeys.add(blockKey);
+  const bbox = block.bbox || null;
+  addAnnotation(block.text, 'comment', currentPage, bbox ? bbox.x : null, bbox ? bbox.y : null, 'ocr', block.bbox);
+  renderOcrBlocksForPage(currentPage); // re-render to show "✓ Added"
 }
 
 document.getElementById('addManualBtn').addEventListener('click', () => {
@@ -577,7 +641,7 @@ document.getElementById('addManualBtn').addEventListener('click', () => {
   switchMobileTab('ann');
 });
 
-function addAnnotation(text, type, page) {
+function addAnnotation(text, type, page, x, y, source, bbox) {
   const ann = {
     id: (typeof crypto !== 'undefined' && crypto.randomUUID)
           ? crypto.randomUUID()
@@ -585,9 +649,16 @@ function addAnnotation(text, type, page) {
     text: text.trim(),
     type: type || 'comment',
     page: page || null,
+    x: x != null ? x : null,
+    y: y != null ? y : null,
+    source: source || 'manual',
+    extraction_type: source === 'ocr' ? 'text_block' : (source === 'pdf_annotation' ? 'embedded' : 'user'),
+    bbox: bbox || null,
+    added_at: new Date().toISOString(),
   };
   annotations.push(ann);
   renderAnnotations();
+  renderMarkers();
   saveAnnotations();
 
   // Scroll to new annotation
@@ -605,16 +676,26 @@ function renderAnnotations() {
   if (tabBadge) tabBadge.textContent = annotations.length;
 
   if (annotations.length === 0) {
-    list.innerHTML = '<p class="muted empty-msg">No annotations yet.<br />Click ➕ on a text block to add one,<br />or use <strong>+ Add for Page N</strong> to write one manually.</p>';
+    list.innerHTML = '<p class="muted empty-msg">No annotations yet.<br />Click ➕ on a text block to add one,<br />or long-press on the PDF page to add at a location.</p>';
     return;
   }
 
-  list.innerHTML = annotations.map((ann, idx) => `
+  list.innerHTML = annotations.map((ann, idx) => {
+    const sourceBadge = ann.source === 'pdf_annotation'
+      ? '<span class="src-badge printed" title="Imported from PDF">PDF</span>'
+      : ann.source === 'ocr'
+      ? '<span class="src-badge ocr" title="From OCR text block">OCR</span>'
+      : '';
+    const locationBadge = (ann.x != null && ann.y != null)
+      ? `<span class="loc-badge" title="Position: ${Math.round(ann.x)}%, ${Math.round(ann.y)}%">📍</span>`
+      : '';
+    return `
     <div class="ann-item" data-ann-id="${ann.id}">
       <div class="ann-item-header">
         <span class="ann-num">#${idx + 1}</span>
         ${ann.page ? `<span class="ann-page">p.${ann.page}</span>` : ''}
-        ${ann.source === 'pdf_annotation' ? '<span class="src-badge printed" title="Imported from PDF">PDF</span>' : ''}
+        ${sourceBadge}
+        ${locationBadge}
         <select class="ann-type-select" onchange="updateAnnType('${ann.id}', this.value)"
                 aria-label="Annotation type for item ${idx + 1}">
           <option value="comment"  ${ann.type === 'comment'  ? 'selected' : ''}>💬 Comment</option>
@@ -630,12 +711,12 @@ function renderAnnotations() {
                 aria-label="Annotation ${idx + 1} text"
                 oninput="updateAnnText('${ann.id}', this.value)">${escHtml(ann.text)}</textarea>
     </div>
-  `).join('');
+  `}).join('');
 }
 
 function updateAnnType(id, newType) {
   const ann = annotations.find(a => String(a.id) === String(id));
-  if (ann) { ann.type = newType; saveAnnotations(); }
+  if (ann) { ann.type = newType; renderMarkers(); saveAnnotations(); }
 }
 
 function updateAnnText(id, newText) {
@@ -645,8 +726,25 @@ function updateAnnText(id, newText) {
 
 function deleteAnnotation(id) {
   annotations = annotations.filter(a => String(a.id) !== String(id));
+  // Rebuild addedBlockKeys from remaining annotations
+  _rebuildAddedBlockKeys();
   renderAnnotations();
+  renderMarkers();
+  renderOcrBlocksForPage(currentPage);
   saveAnnotations();
+}
+
+function _rebuildAddedBlockKeys() {
+  addedBlockKeys.clear();
+  // Re-check which blocks on current page are still in annotations
+  const pageData = ocrResults.find(r => r.page === currentPage);
+  if (!pageData) return;
+  pageData.blocks.forEach((block, idx) => {
+    const match = annotations.find(a =>
+      a.page === currentPage && a.text === block.text && a.source === 'ocr'
+    );
+    if (match) addedBlockKeys.add(`${currentPage}:${idx}`);
+  });
 }
 
 async function saveAnnotations() {
@@ -715,6 +813,161 @@ document.getElementById('deleteBtn').addEventListener('click', async () => {
 });
 
 // ============================================================
+// PDF overlay markers for annotations
+// ============================================================
+function renderMarkers() {
+  const overlay = document.getElementById('markerOverlay');
+  if (!overlay) return;
+  overlay.innerHTML = '';
+
+  const pageAnns = annotations.filter(a => a.page === currentPage);
+  if (pageAnns.length === 0) return;
+
+  pageAnns.forEach((ann, i) => {
+    if (ann.x == null || ann.y == null) return;
+    const marker = document.createElement('div');
+    marker.className = `change-marker marker-${ann.type || 'comment'}`;
+    marker.style.left = ann.x + '%';
+    marker.style.top = ann.y + '%';
+    marker.title = `#${annotations.indexOf(ann) + 1}: ${ann.text.substring(0, 60)}`;
+    marker.setAttribute('data-ann-id', ann.id);
+    marker.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showMarkerPopup(ann, marker);
+    });
+    overlay.appendChild(marker);
+  });
+}
+
+function showMarkerPopup(ann, markerEl) {
+  const popup = document.getElementById('markerPopup');
+  const title = document.getElementById('markerPopupTitle');
+  const body = document.getElementById('markerPopupBody');
+  if (!popup || !body) return;
+
+  const idx = annotations.indexOf(ann) + 1;
+  const typeLabel = {comment: '💬 Comment', insert: '➕ Insert', delete: '🗑 Delete'}[ann.type] || ann.type;
+  title.textContent = `#${idx} ${typeLabel}`;
+  body.innerHTML = `<p class="marker-popup-text">${escHtml(ann.text) || '<em>Empty</em>'}</p>
+    <div class="marker-popup-meta">
+      ${ann.source ? `<span class="src-badge ${ann.source}">${ann.source}</span>` : ''}
+      ${ann.extraction_type ? `<span class="meta-tag">${ann.extraction_type}</span>` : ''}
+    </div>
+    <button class="btn-secondary btn-sm" onclick="scrollToAnnotation('${ann.id}')">View in list</button>`;
+
+  // Position popup near the marker
+  const wrapper = document.getElementById('pdfPageWrapper');
+  const wrapRect = wrapper.getBoundingClientRect();
+  const mRect = markerEl.getBoundingClientRect();
+  popup.style.left = (mRect.left - wrapRect.left + 20) + 'px';
+  popup.style.top = (mRect.top - wrapRect.top) + 'px';
+  popup.style.display = 'block';
+}
+
+function closeMarkerPopup() {
+  const popup = document.getElementById('markerPopup');
+  if (popup) popup.style.display = 'none';
+}
+
+function scrollToAnnotation(id) {
+  closeMarkerPopup();
+  switchMobileTab('ann');
+  const el = document.querySelector(`[data-ann-id="${id}"]`);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('ann-highlight');
+    setTimeout(() => el.classList.remove('ann-highlight'), 2000);
+  }
+}
+
+// ============================================================
+// Long-press on PDF to add annotation at location
+// ============================================================
+let _longPressListenersAttached = false; // track if listeners are set up
+
+function _setupLongPress() {
+  const wrapper = document.getElementById('pdfPageWrapper');
+  if (!wrapper || _longPressListenersAttached) return;
+  _longPressListenersAttached = true;
+
+  wrapper.addEventListener('pointerdown', _onPointerDown);
+  wrapper.addEventListener('pointerup', _onPointerUp);
+  wrapper.addEventListener('pointerleave', _onPointerUp);
+  wrapper.addEventListener('contextmenu', _onContextMenu);
+}
+
+function _onContextMenu(e) {
+  // Prevent default context menu on long-press
+  if (_longPressTimer) e.preventDefault();
+}
+
+function _onPointerDown(e) {
+  if (e.button !== 0) return; // left button only
+  const wrapper = document.getElementById('pdfPageWrapper');
+  const img = document.getElementById('pdfPageImg');
+  if (!wrapper || !img) return;
+
+  const imgRect = img.getBoundingClientRect();
+  const x = ((e.clientX - imgRect.left) / imgRect.width) * 100;
+  const y = ((e.clientY - imgRect.top) / imgRect.height) * 100;
+
+  // Only trigger if click is on the image area
+  if (x < 0 || x > 100 || y < 0 || y > 100) return;
+
+  _longPressPos = { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
+  _longPressTimer = setTimeout(() => {
+    _longPressTimer = null;
+    showAddChangePopup(_longPressPos.x, _longPressPos.y);
+  }, 600); // 600ms long-press
+}
+
+function _onPointerUp() {
+  if (_longPressTimer) {
+    clearTimeout(_longPressTimer);
+    _longPressTimer = null;
+  }
+}
+
+function showAddChangePopup(xPct, yPct) {
+  const popup = document.getElementById('addChangePopup');
+  if (!popup) return;
+
+  popup._xPct = xPct;
+  popup._yPct = yPct;
+
+  // Position popup near the press location
+  const wrapper = document.getElementById('pdfPageWrapper');
+  const img = document.getElementById('pdfPageImg');
+  if (wrapper && img) {
+    const imgRect = img.getBoundingClientRect();
+    const wrapRect = wrapper.getBoundingClientRect();
+    popup.style.left = Math.min((xPct / 100) * imgRect.width + 20, imgRect.width - 200) + 'px';
+    popup.style.top = (yPct / 100) * imgRect.height + 'px';
+  }
+
+  document.getElementById('addChangeText').value = '';
+  document.getElementById('addChangeType').value = 'comment';
+  popup.style.display = 'block';
+  document.getElementById('addChangeText').focus();
+}
+
+function closeAddChangePopup() {
+  const popup = document.getElementById('addChangePopup');
+  if (popup) popup.style.display = 'none';
+}
+
+function confirmAddChange() {
+  const popup = document.getElementById('addChangePopup');
+  if (!popup) return;
+  const text = document.getElementById('addChangeText').value;
+  const type = document.getElementById('addChangeType').value;
+  const xPct = popup._xPct;
+  const yPct = popup._yPct;
+  closeAddChangePopup();
+  addAnnotation(text, type, currentPage, xPct, yPct, 'manual', null);
+}
+
+// ============================================================
 // Utilities
 // ============================================================
 function showOverlay(msg) {
@@ -742,49 +995,67 @@ function escHtml(str) {
 }
 
 // ============================================================
-// Debug panel
+// Debug panel (live polling)
 // ============================================================
 function toggleDebugPanel() {
   const panel = document.getElementById('debugPanel');
   if (!panel) return;
-  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  const isVisible = panel.style.display !== 'none';
+  panel.style.display = isVisible ? 'none' : 'block';
+
+  if (!isVisible) {
+    // Start live polling when panel opens
+    _pollDebugLog();
+    _debugPollTimer = setInterval(_pollDebugLog, 3000);
+  } else {
+    // Stop polling when panel closes
+    if (_debugPollTimer) {
+      clearInterval(_debugPollTimer);
+      _debugPollTimer = null;
+    }
+  }
 }
 
-function renderDebugPanel() {
-  const panel = document.getElementById('debugPanel');
-  const content = document.getElementById('debugContent');
-  if (!panel || !content || !debugData) return;
+async function _pollDebugLog() {
+  try {
+    const resp = await fetch(`/api/debug/live/${SESSION_ID}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.debug_mode === false) return;
+    _renderLiveDebugPanel(data);
+  } catch (_) { /* non-critical */ }
+}
 
-  panel.style.display = 'block';
+function _renderLiveDebugPanel(data) {
+  const content = document.getElementById('debugContent');
+  if (!content) return;
 
   let html = '<div class="debug-grid">';
 
   // System info
-  html += '<div class="debug-section"><h4>System</h4><table class="debug-table">';
-  const sysFields = [
-    ['Tesseract', debugData.tesseract_version || 'unknown'],
-    ['Tesseract Installed', debugData.tesseract_installed ? '✅ Yes' : '❌ No'],
-    ['Poppler', debugData.poppler_version || 'unknown'],
-    ['Poppler Installed', debugData.poppler_installed ? '✅ Yes' : '❌ No'],
-    ['Pillow', debugData.pillow_version || 'unknown'],
-    ['pdf2image', debugData.pdf2image_version || 'unknown'],
-  ];
-  if (debugData.disk_free_mb != null) {
-    sysFields.push(['Disk Free', debugData.disk_free_mb + ' MB']);
+  if (data.system) {
+    html += '<div class="debug-section"><h4>System</h4><table class="debug-table">';
+    const sys = data.system;
+    const sysFields = [
+      ['Tesseract', sys.tesseract_version || 'unknown'],
+      ['Tesseract Installed', sys.tesseract_installed ? '✅ Yes' : '❌ No'],
+      ['Poppler', sys.poppler_version || 'unknown'],
+      ['Poppler Installed', sys.poppler_installed ? '✅ Yes' : '❌ No'],
+    ];
+    if (sys.disk_free_mb != null) sysFields.push(['Disk Free', sys.disk_free_mb + ' MB']);
+    sysFields.forEach(([k, v]) => {
+      html += `<tr><td class="debug-key">${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`;
+    });
+    html += '</table></div>';
   }
-  sysFields.forEach(([k, v]) => {
-    html += `<tr><td class="debug-key">${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`;
-  });
-  html += '</table></div>';
 
-  // Session / PDF info
+  // Session info
   html += '<div class="debug-section"><h4>Session</h4><table class="debug-table">';
   const sessFields = [
-    ['Session ID', debugData.session_id || SESSION_ID],
-    ['OCR Engine', debugData.ocr_engine || OCR_ENGINE],
-    ['PDF Size', debugData.pdf_file_size_mb != null ? `${debugData.pdf_file_size_mb} MB` : 'unknown'],
-    ['Total Time', debugData.total_elapsed_sec != null ? `${debugData.total_elapsed_sec}s` : 'pending'],
-    ['Timestamp', debugData.timestamp || ''],
+    ['Session ID', data.session_id || SESSION_ID],
+    ['OCR Engine', data.ocr_engine || OCR_ENGINE],
+    ['Pages', data.num_pages || '?'],
+    ['OCR Pages Done', (data.events || []).length],
   ];
   sessFields.forEach(([k, v]) => {
     html += `<tr><td class="debug-key">${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`;
@@ -793,29 +1064,39 @@ function renderDebugPanel() {
 
   html += '</div>'; // close debug-grid
 
-  // Processing steps
-  if (debugData.steps && debugData.steps.length > 0) {
-    html += '<div class="debug-section"><h4>Processing Steps</h4>';
+  // Live OCR events
+  if (data.events && data.events.length > 0) {
+    html += '<div class="debug-section"><h4>OCR Processing Log</h4>';
     html += '<table class="debug-table debug-steps-table"><thead><tr>';
-    html += '<th>Step</th><th>Status</th><th>Time</th><th>Details</th>';
+    html += '<th>Page</th><th>Blocks</th><th>Chars</th><th>Time</th><th>Cached</th>';
     html += '</tr></thead><tbody>';
-    debugData.steps.forEach(step => {
-      const statusIcon = step.status === 'ok' ? '✅' : '❌';
-      const statusClass = step.status === 'ok' ? 'debug-ok' : 'debug-error';
-      let details = '';
-      if (step.num_pages != null) details += `Pages: ${step.num_pages}  `;
-      if (step.num_blocks != null) details += `Blocks: ${step.num_blocks}  `;
-      if (step.total_chars != null) details += `Chars: ${step.total_chars}  `;
-      if (step.image_size) details += `Size: ${step.image_size}  `;
-      if (step.error) details += `Error: ${step.error}`;
-      html += `<tr class="${statusClass}">`;
-      html += `<td>${escHtml(step.step)}</td>`;
-      html += `<td>${statusIcon} ${escHtml(step.status)}</td>`;
-      html += `<td>${step.elapsed_sec != null ? step.elapsed_sec + 's' : '-'}</td>`;
-      html += `<td class="debug-details">${escHtml(details.trim())}</td>`;
+    data.events.forEach(ev => {
+      html += '<tr>';
+      html += `<td>${ev.page}</td>`;
+      html += `<td>${ev.num_blocks}</td>`;
+      html += `<td>${ev.total_chars}</td>`;
+      html += `<td>${ev.elapsed_sec != null ? ev.elapsed_sec + 's' : '-'}</td>`;
+      html += `<td>${ev.cached ? '✅' : '🔄'}</td>`;
       html += '</tr>';
     });
     html += '</tbody></table></div>';
+  }
+
+  // Global debug log
+  if (data.global_log && data.global_log.length > 0) {
+    html += '<div class="debug-section"><h4>Debug Log</h4>';
+    html += '<div class="debug-log-entries">';
+    data.global_log.forEach(entry => {
+      const ts = entry.timestamp || '';
+      const ev = entry.event || 'unknown';
+      const err = entry.error || '';
+      html += `<div class="debug-log-entry">
+        <span class="debug-ts">${escHtml(ts)}</span>
+        <span class="debug-ev">${escHtml(ev)}</span>
+        <span class="debug-err">${escHtml(err)}</span>
+      </div>`;
+    });
+    html += '</div></div>';
   }
 
   content.innerHTML = html;

@@ -50,6 +50,8 @@ class OCREngine:
             config="--psm 1",
         )
 
+        img_w, img_h = image.size
+
         blocks = {}
         for i in range(len(data["text"])):
             text = data["text"][i].strip()
@@ -59,16 +61,50 @@ class OCREngine:
             if conf < 0:
                 conf = 0
             block_num = data["block_num"][i]
+
+            left = data["left"][i]
+            top = data["top"][i]
+            width = data["width"][i]
+            height = data["height"][i]
+
             if block_num not in blocks:
-                blocks[block_num] = {"text": text, "confidence": conf, "block_num": block_num}
+                blocks[block_num] = {
+                    "text": text,
+                    "confidence": conf,
+                    "block_num": block_num,
+                    "_left": left,
+                    "_top": top,
+                    "_right": left + width,
+                    "_bottom": top + height,
+                }
             else:
                 blocks[block_num]["text"] += " " + text
                 if conf > 0:
                     blocks[block_num]["confidence"] = (
                         blocks[block_num]["confidence"] + conf
                     ) // 2
+                blocks[block_num]["_left"] = min(blocks[block_num]["_left"], left)
+                blocks[block_num]["_top"] = min(blocks[block_num]["_top"], top)
+                blocks[block_num]["_right"] = max(blocks[block_num]["_right"], left + width)
+                blocks[block_num]["_bottom"] = max(blocks[block_num]["_bottom"], top + height)
 
-        return [b for b in blocks.values() if b["text"].strip()]
+        result = []
+        for b in blocks.values():
+            if not b["text"].strip():
+                continue
+            bbox = {
+                "x": round(b["_left"] / img_w * 100, 2) if img_w else 0,
+                "y": round(b["_top"] / img_h * 100, 2) if img_h else 0,
+                "w": round((b["_right"] - b["_left"]) / img_w * 100, 2) if img_w else 0,
+                "h": round((b["_bottom"] - b["_top"]) / img_h * 100, 2) if img_h else 0,
+            }
+            result.append({
+                "text": b["text"],
+                "confidence": b["confidence"],
+                "block_num": b["block_num"],
+                "bbox": bbox,
+            })
+        return result
 
     # ------------------------------------------------------------------
     # OpenAI GPT-4o Vision (paid)

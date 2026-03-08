@@ -1906,7 +1906,10 @@ class TestS3Storage(unittest.TestCase):
         """_save_json should upload the file to S3 when S3 is enabled."""
         import storage as storage_module
         test_path = Path(_test_upload_dir) / "test_upload.json"
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_upload", return_value=True) as mock_upload:
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_upload", return_value=True) as mock_upload,
+        ):
             app_module._save_json(test_path, {"key": "value"})
             mock_upload.assert_called_once()
             call_args = mock_upload.call_args
@@ -1917,7 +1920,10 @@ class TestS3Storage(unittest.TestCase):
         """_save_json must not call s3_upload when S3 is disabled."""
         import storage as storage_module
         test_path = Path(_test_upload_dir) / "test_no_upload.json"
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False),              unittest.mock.patch.object(storage_module, "s3_upload") as mock_upload:
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=False),
+            unittest.mock.patch.object(storage_module, "s3_upload") as mock_upload,
+        ):
             app_module._save_json(test_path, {"x": 1})
             mock_upload.assert_not_called()
 
@@ -1926,7 +1932,10 @@ class TestS3Storage(unittest.TestCase):
         import storage as storage_module
         missing = Path(_test_upload_dir) / "missing.json"
         self.assertFalse(missing.exists())
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_download", return_value=False) as mock_dl:
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_download", return_value=False) as mock_dl,
+        ):
             result = app_module._load_json(missing, {})
             mock_dl.assert_called_once()
             self.assertEqual(result, {})
@@ -1936,7 +1945,10 @@ class TestS3Storage(unittest.TestCase):
         import storage as storage_module
         local = Path(_test_upload_dir) / "existing.json"
         local.write_text('{"found": true}')
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_download") as mock_dl:
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_download") as mock_dl,
+        ):
             result = app_module._load_json(local, {})
             mock_dl.assert_not_called()
             self.assertEqual(result, {"found": True})
@@ -1951,7 +1963,10 @@ class TestS3Storage(unittest.TestCase):
     def test_restore_session_from_s3_returns_false_when_not_in_s3(self):
         """_restore_session_from_s3 returns False when S3 has no matching keys."""
         import storage as storage_module
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=[]):
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=[]),
+        ):
             result = app_module._restore_session_from_s3("ghost-session")
             self.assertFalse(result)
 
@@ -1972,7 +1987,11 @@ class TestS3Storage(unittest.TestCase):
                 path.write_text("[]")
             return True
 
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=fake_keys),              unittest.mock.patch.object(storage_module, "s3_download", side_effect=fake_download):
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=fake_keys),
+            unittest.mock.patch.object(storage_module, "s3_download", side_effect=fake_download),
+        ):
             result = app_module._restore_session_from_s3(session_id)
 
         self.assertTrue(result)
@@ -1997,7 +2016,11 @@ class TestS3Storage(unittest.TestCase):
             path.write_text("{}")
             return True
 
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=fake_keys),              unittest.mock.patch.object(storage_module, "s3_download", side_effect=fake_download):
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_list_keys", return_value=fake_keys),
+            unittest.mock.patch.object(storage_module, "s3_download", side_effect=fake_download),
+        ):
             app_module._restore_session_from_s3(session_id)
 
         self.assertNotIn(f"{session_id}/pages/page0001.png", downloaded_keys)
@@ -2011,7 +2034,10 @@ class TestS3Storage(unittest.TestCase):
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / "config.json").write_text("{}")
 
-        with unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),              unittest.mock.patch.object(storage_module, "s3_delete_prefix") as mock_del:
+        with (
+            unittest.mock.patch.object(storage_module, "is_s3_enabled", return_value=True),
+            unittest.mock.patch.object(storage_module, "s3_delete_prefix") as mock_del,
+        ):
             app_module._cleanup_session(session_id)
             mock_del.assert_called_once_with(f"{session_id}/")
 

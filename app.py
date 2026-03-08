@@ -1172,6 +1172,55 @@ def debug_system_info():
     return jsonify(_get_system_debug_info())
 
 
+@app.route("/api/debug/live/<session_id>")
+def debug_live_log(session_id):
+    """Return session-specific debug events for live polling.
+
+    Aggregates per-page OCR cache files, system info and the global debug
+    log into a single response so the frontend debug panel can poll for
+    real-time updates without needing server-sent events.
+    """
+    if not DEBUG_MODE:
+        return jsonify({"debug_mode": False})
+
+    sdir = UPLOAD_BASE / session_id
+    if not sdir.exists() and not _restore_session_from_s3(session_id):
+        return jsonify({"error": "Session not found."}), 404
+
+    config = _load_json(sdir / "config.json", {})
+    events: list[dict[str, Any]] = []
+
+    # Collect per-page OCR results as events
+    pages_dir = sdir / "pages"
+    num_pages = _count_png_pages(pages_dir) if pages_dir.exists() else 0
+    for p in range(1, num_pages + 1):
+        p_cache = sdir / f"ocr_page_{p}.json"
+        if p_cache.exists():
+            pdata = _load_json(p_cache, {})
+            debug_info = pdata.get("debug", {})
+            events.append({
+                "ts": os.path.getmtime(str(p_cache)),
+                "event": "ocr_page",
+                "page": p,
+                "num_blocks": debug_info.get("num_blocks", len(pdata.get("blocks", []))),
+                "total_chars": debug_info.get("total_chars", 0),
+                "elapsed_sec": debug_info.get("ocr_elapsed_sec", None),
+                "cached": pdata.get("cached", False),
+            })
+
+    # Global debug log entries
+    global_log = _load_json(DEBUG_LOG_PATH, [])
+
+    return jsonify({
+        "session_id": session_id,
+        "ocr_engine": config.get("ocr_engine", "tesseract"),
+        "num_pages": num_pages,
+        "system": _get_system_debug_info(),
+        "events": events,
+        "global_log": global_log[-50:],  # last 50 entries
+    })
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

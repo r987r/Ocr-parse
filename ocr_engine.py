@@ -96,7 +96,7 @@ class OCREngine:
                 "x": round(b["_left"] / img_w * 100, 2) if img_w else 0,
                 "y": round(b["_top"] / img_h * 100, 2) if img_h else 0,
                 "w": round((b["_right"] - b["_left"]) / img_w * 100, 2) if img_w else 0,
-                "h": round((b["_right"] - b["_left"]) / img_h * 100, 2) if img_h else 0,
+                "h": round((b["_bottom"] - b["_top"]) / img_h * 100, 2) if img_h else 0,
             }
             result.append({
                 "text": b["text"],

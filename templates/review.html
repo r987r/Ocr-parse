@@ -304,7 +304,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       document.querySelector('#processingOverlay small').textContent =
         'Please refresh the page to try again. If the problem persists, try a smaller PDF or check your connection.';
     }
-    if (DEBUG_MODE && debugData) _pollDebugLog();
+    if (DEBUG_MODE && debugData) {
+      const panel = document.getElementById('debugPanel');
+      if (panel && panel.style.display !== 'none') _pollDebugLog();
+    }
   }
 });
 
@@ -880,15 +883,12 @@ function scrollToAnnotation(id) {
 // ============================================================
 // Long-press on PDF to add annotation at location
 // ============================================================
+let _longPressListenersAttached = false; // track if listeners are set up
+
 function _setupLongPress() {
   const wrapper = document.getElementById('pdfPageWrapper');
-  if (!wrapper) return;
-
-  // Remove old listeners by replacing node (simple cleanup)
-  wrapper.removeEventListener('pointerdown', _onPointerDown);
-  wrapper.removeEventListener('pointerup', _onPointerUp);
-  wrapper.removeEventListener('pointerleave', _onPointerUp);
-  wrapper.removeEventListener('contextmenu', _onContextMenu);
+  if (!wrapper || _longPressListenersAttached) return;
+  _longPressListenersAttached = true;
 
   wrapper.addEventListener('pointerdown', _onPointerDown);
   wrapper.addEventListener('pointerup', _onPointerUp);
